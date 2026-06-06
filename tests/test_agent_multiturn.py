@@ -1,0 +1,234 @@
+"""Milestone 5 — end-to-end graph: multi-turn, disambiguation, routing.
+
+The LLM is faked (FakeRouter); MBTA HTTP is respx-mocked. Exercises the compiled
+graph with a MemorySaver checkpointer across turns.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import httpx
+
+from dexter.agent.graph import build_graph
+from dexter.agent.router import RouterSlots
+from dexter.mbta.client import MBTAClient
+from dexter.mbta.models import Disambiguation, PredictionResult
+from dexter.mbta.predictions import DeparturesService
+from dexter.mbta.resolution import Resolver
+from dexter.mbta.routes import RouteCache
+
+from .conftest import MBTA_BASE_URL, ROUTES_PAYLOAD
+
+
+class FakeRouter:
+    """Returns canned slots per message (the LLM stand-in)."""
+
+    def __init__(self, mapping: dict[str, RouterSlots]):
+        self._mapping = mapping
+
+    async def route(self, message: str, *, history=None) -> RouterSlots:
+        return self._mapping[message]
+
+
+def stops_payload(*stops: tuple[str, str]) -> dict:
+    return {
+        "data": [{"type": "stop", "id": sid, "attributes": {"name": name}} for sid, name in stops]
+    }
+
+
+def future_predictions(*offsets_min: float) -> dict:
+    now = datetime.now(UTC)
+    return {
+        "data": [
+            {
+                "type": "prediction",
+                "id": str(i),
+                "attributes": {
+                    "departure_time": (now + timedelta(minutes=m)).isoformat(),
+                    "arrival_time": None,
+                },
+            }
+            for i, m in enumerate(offsets_min)
+        ]
+    }
+
+
+def build(respx_mock, router: FakeRouter):
+    respx_mock.get(f"{MBTA_BASE_URL}/routes").mock(
+        return_value=httpx.Response(200, json=ROUTES_PAYLOAD)
+    )
+    client = MBTAClient(base_url=MBTA_BASE_URL)
+    resolver = Resolver(client, RouteCache(client))
+    departures = DeparturesService(client)
+    graph = build_graph(router=router, resolver=resolver, departures=departures)
+    return graph, client
+
+
+def config(session_id: str) -> dict:
+    return {"configurable": {"thread_id": session_id}}
+
+
+async def test_disambiguation_resolves_on_next_turn(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    respx_mock.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=future_predictions(5, 13))
+    )
+    router = FakeRouter(
+        {
+            "next 116 from Maverick": RouterSlots(
+                intent="predictions", route="116", location="Maverick"
+            ),
+            "toward Wonderland": RouterSlots(
+                intent="predictions", direction_hint="Wonderland", follow_up=True
+            ),
+        }
+    )
+    graph, client = build(respx_mock, router)
+
+    turn1 = await graph.ainvoke({"message": "next 116 from Maverick"}, config("s1"))
+    assert isinstance(turn1["result"], Disambiguation)
+    assert turn1["needs_input"] is True
+    assert turn1["reply"].startswith("Which direction —")
+
+    turn2 = await graph.ainvoke({"message": "toward Wonderland"}, config("s1"))
+    assert isinstance(turn2["result"], PredictionResult)
+    assert turn2["needs_input"] is False
+    assert "116 toward Wonderland" in turn2["reply"]
+    assert "Which direction" not in turn2["reply"]
+    await client.aclose()
+
+
+async def test_follow_up_reuses_prior_slots(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    respx_mock.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=future_predictions(5, 13, 21))
+    )
+    router = FakeRouter(
+        {
+            "next 116 from Maverick toward Wonderland": RouterSlots(
+                intent="predictions", route="116", location="Maverick", direction_hint="Wonderland"
+            ),
+            "and the one after?": RouterSlots(intent="predictions", follow_up=True),
+        }
+    )
+    graph, client = build(respx_mock, router)
+
+    turn1 = await graph.ainvoke(
+        {"message": "next 116 from Maverick toward Wonderland"}, config("s2")
+    )
+    assert isinstance(turn1["result"], PredictionResult)
+
+    # Follow-up carries no route/location/direction; it must reuse the last target.
+    turn2 = await graph.ainvoke({"message": "and the one after?"}, config("s2"))
+    assert isinstance(turn2["result"], PredictionResult)
+    assert turn2["result"].target.route_id == "116"
+    assert turn2["result"].target.direction_destination == "Wonderland"
+    assert "116 toward Wonderland" in turn2["reply"]
+    await client.aclose()
+
+
+async def test_sessions_are_isolated(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    router = FakeRouter(
+        {
+            "next 116 from Maverick": RouterSlots(
+                intent="predictions", route="116", location="Maverick"
+            ),
+            "and the one after?": RouterSlots(intent="predictions", follow_up=True),
+        }
+    )
+    graph, client = build(respx_mock, router)
+
+    # Session A asks an ambiguous question (leaves a pending disambiguation in A).
+    turn_a = await graph.ainvoke({"message": "next 116 from Maverick"}, config("A"))
+    assert isinstance(turn_a["result"], Disambiguation)  # A is mid-clarification
+
+    # Session B's follow-up shares no memory with A: no pending, no last_target.
+    # So it can't reuse anything and must ask which route — proving isolation.
+    turn_b = await graph.ainvoke({"message": "and the one after?"}, config("B"))
+    assert isinstance(turn_b["result"], Disambiguation)
+    assert turn_b["result"].kind.value == "route"
+    assert "Which route" in turn_b["reply"]
+    await client.aclose()
+
+
+async def test_fresh_query_escapes_a_pending_clarification(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    respx_mock.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=future_predictions(5))
+    )
+    router = FakeRouter(
+        {
+            # Turn 1: missing direction -> leaves a DIRECTION clarification pending.
+            "next 116 from Maverick": RouterSlots(
+                intent="predictions", route="116", location="Maverick"
+            ),
+            # Turn 2: a self-contained new query (route + location) -> must NOT be
+            # swallowed as an answer; it resolves on its own.
+            "actually next 116 from Maverick toward Wonderland": RouterSlots(
+                intent="predictions", route="116", location="Maverick", direction_hint="Wonderland"
+            ),
+        }
+    )
+    graph, client = build(respx_mock, router)
+
+    turn1 = await graph.ainvoke({"message": "next 116 from Maverick"}, config("esc"))
+    assert isinstance(turn1["result"], Disambiguation)
+
+    turn2 = await graph.ainvoke(
+        {"message": "actually next 116 from Maverick toward Wonderland"}, config("esc")
+    )
+    assert isinstance(turn2["result"], PredictionResult)
+    assert turn2["needs_input"] is False
+    assert "116 toward Wonderland" in turn2["reply"]
+    await client.aclose()
+
+
+async def test_alerts_intent_routes_to_stub(respx_mock):
+    router = FakeRouter({"is the Blue Line down?": RouterSlots(intent="alerts", route="Blue Line")})
+    graph, client = build(respx_mock, router)
+    turn = await graph.ainvoke({"message": "is the Blue Line down?"}, config("s3"))
+    assert turn["reply"] == "I can't check service alerts yet — that's coming in a later version."
+    await client.aclose()
+
+
+async def test_unknown_intent_routes_to_fallback(respx_mock):
+    router = FakeRouter({"what's the weather?": RouterSlots(intent="unknown")})
+    graph, client = build(respx_mock, router)
+    turn = await graph.ainvoke({"message": "what's the weather?"}, config("s4"))
+    assert "next bus or train" in turn["reply"]
+    await client.aclose()
+
+
+async def test_replies_have_no_ids_or_json(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    respx_mock.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=future_predictions(5))
+    )
+    router = FakeRouter(
+        {
+            "next 116 from Maverick toward Wonderland": RouterSlots(
+                intent="predictions", route="116", location="Maverick", direction_hint="Wonderland"
+            )
+        }
+    )
+    graph, client = build(respx_mock, router)
+    turn = await graph.ainvoke(
+        {"message": "next 116 from Maverick toward Wonderland"}, config("s5")
+    )
+    reply = turn["reply"]
+    assert "{" not in reply and "}" not in reply
+    assert "70" not in reply  # no stop_id
+    assert "_id" not in reply
+    await client.aclose()

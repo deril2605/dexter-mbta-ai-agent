@@ -1,0 +1,121 @@
+"""Intent + slot extraction via Azure OpenAI tool-calling (PRD §6.2).
+
+This is the ONLY LLM in Dexter. It classifies the message into
+``predictions | alerts | facilities | unknown`` and extracts slots — it never
+answers the question or produces any times.
+
+Targets gpt-5-mini on Azure: Chat Completions + tool-calling, using
+``max_completion_tokens`` and no custom ``temperature`` (gpt-5 only accepts the
+default). The deployment name comes from config.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+
+INTENTS = ("predictions", "alerts", "facilities", "unknown")
+TOOL_NAME = "extract_transit_query"
+
+SYSTEM_PROMPT = """You are the intent router for Dexter, an MBTA (Boston) transit assistant.
+Classify the user's latest message and extract slots by calling the tool \
+`extract_transit_query`. Do not answer the question and never state any times — only extract.
+
+intent:
+- "predictions": when the next bus/train arrives or departs \
+(e.g. "when's the next 116 from Bennington Street toward Maverick").
+- "alerts": service alerts, delays, disruptions ("is the Blue Line down?").
+- "facilities": elevators or escalators ("is the elevator at Park St working?").
+- "unknown": anything not about MBTA transit.
+
+slots (leave a slot out when it isn't present):
+- route: the route exactly as the user said it ("116", "Blue Line", "Green Line B").
+- location: the stop or place ("Bennington Street", "Maverick").
+- direction_hint: a destination or direction mentioned ("Maverick", "inbound", "toward Harvard").
+- follow_up: true when the message refers back to a previous turn — a continuation \
+("and the one after?", "what about inbound?") or a short answer to a clarifying question \
+("the 116", "toward Maverick", "Maverick Station")."""
+
+_TOOL = {
+    "type": "function",
+    "function": {
+        "name": TOOL_NAME,
+        "description": "Extract the user's transit intent and slots.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "intent": {"type": "string", "enum": list(INTENTS)},
+                "route": {"type": "string", "description": "Route as said, e.g. 116 or Blue Line."},
+                "location": {"type": "string", "description": "Stop or place name."},
+                "direction_hint": {"type": "string", "description": "Destination or direction."},
+                "follow_up": {"type": "boolean"},
+            },
+            "required": ["intent"],
+        },
+    },
+}
+
+
+@dataclass(frozen=True, slots=True)
+class RouterSlots:
+    intent: str
+    route: str | None = None
+    location: str | None = None
+    direction_hint: str | None = None
+    follow_up: bool = False
+
+
+class Router:
+    """Wraps an (Async)AzureOpenAI client to extract intent + slots."""
+
+    def __init__(self, client, deployment: str, *, max_completion_tokens: int = 2000) -> None:
+        self._client = client
+        self._deployment = deployment
+        self._max_completion_tokens = max_completion_tokens
+
+    async def route(self, message: str, *, history: list[dict] | None = None) -> RouterSlots:
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": message})
+
+        response = await self._client.chat.completions.create(
+            model=self._deployment,
+            messages=messages,
+            tools=[_TOOL],
+            tool_choice="required",  # one tool defined -> always our extractor
+            max_completion_tokens=self._max_completion_tokens,
+        )
+        return _parse_response(response)
+
+
+def _parse_response(response) -> RouterSlots:
+    """Parse the tool call into slots; degrade to 'unknown' on any malformed output."""
+    try:
+        tool_calls = response.choices[0].message.tool_calls
+    except (AttributeError, IndexError, TypeError):
+        return RouterSlots(intent="unknown")
+    if not tool_calls:
+        return RouterSlots(intent="unknown")
+    try:
+        args = json.loads(tool_calls[0].function.arguments)
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        return RouterSlots(intent="unknown")
+
+    intent = args.get("intent")
+    if intent not in INTENTS:
+        intent = "unknown"
+    return RouterSlots(
+        intent=intent,
+        route=_clean(args.get("route")),
+        location=_clean(args.get("location")),
+        direction_hint=_clean(args.get("direction_hint")),
+        follow_up=bool(args.get("follow_up", False)),
+    )
+
+
+def _clean(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None

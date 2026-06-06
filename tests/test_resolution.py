@@ -1,0 +1,216 @@
+"""Milestone 2 — route-first resolution (the highest-risk milestone).
+
+Covers: known stop resolves; stop ambiguity yields candidates; route-first
+scoping of the /stops fetch; direction resolved from direction_destinations;
+missing direction yields a direction question; bad/missing route asks for
+clarification. All HTTP is respx-mocked.
+"""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from dexter.mbta.client import MBTAClient
+from dexter.mbta.models import Disambiguation, DisambiguationKind, ResolvedTarget
+from dexter.mbta.resolution import Resolver
+from dexter.mbta.routes import RouteCache
+
+from .conftest import MBTA_BASE_URL, ROUTES_PAYLOAD
+
+
+def stops_payload(*stops: tuple[str, str]) -> dict:
+    """Build a /stops JSON:API payload from (id, name) pairs."""
+    return {
+        "data": [{"type": "stop", "id": sid, "attributes": {"name": name}} for sid, name in stops]
+    }
+
+
+@pytest.fixture
+def mock_routes(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/routes").mock(
+        return_value=httpx.Response(200, json=ROUTES_PAYLOAD)
+    )
+    return respx_mock
+
+
+def make_resolver(client: MBTAClient) -> Resolver:
+    return Resolver(client, RouteCache(client))
+
+
+# --- Happy path -------------------------------------------------------------
+
+
+async def test_resolves_route_stop_and_direction(mock_routes):
+    stops = mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(
+            200,
+            json=stops_payload(
+                ("70", "Maverick Station"),
+                ("71", "Bennington St @ Brooks St"),
+                ("72", "Wonderland"),
+            ),
+        )
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve(
+            route_token="116", location="Bennington Street", direction_hint="toward Maverick"
+        )
+
+    assert isinstance(result, ResolvedTarget)
+    assert result.route_id == "116"
+    assert result.route_name == "116"
+    assert result.stop_ids == ("71",)
+    assert result.stop_name == "Bennington St @ Brooks St"
+    assert result.direction_id == 1  # dests = ("Wonderland", "Maverick")
+    assert result.direction_destination == "Maverick"
+    assert stops.called
+
+
+async def test_stops_fetch_is_scoped_to_the_route(mock_routes):
+    stops = mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        await make_resolver(client).resolve("116", "Maverick", "Wonderland")
+
+    # Route-first: the stop fetch must be filtered to this route only.
+    assert stops.calls.last.request.url.params["filter[route]"] == "116"
+
+
+# --- Stop disambiguation ----------------------------------------------------
+
+
+async def test_ambiguous_stop_yields_candidates(mock_routes):
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(
+            200,
+            json=stops_payload(
+                ("71", "Bennington St @ Brooks St"),
+                ("72", "Bennington St @ Boardman St"),
+                ("70", "Maverick Station"),
+            ),
+        )
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("116", "Bennington St", "Maverick")
+
+    assert isinstance(result, Disambiguation)
+    assert result.kind is DisambiguationKind.STOP
+    assert result.route_id == "116"
+    labels = {opt.label for opt in result.options}
+    assert "Bennington St @ Brooks St" in labels
+    assert "Bennington St @ Boardman St" in labels
+    # Each option carries the stop_ids needed to resolve on the next turn.
+    assert all(opt.stop_ids for opt in result.options)
+
+
+async def test_duplicate_named_stops_collapse_to_one_choice(mock_routes):
+    # Two platform records share a name (the directional-platform case). They must
+    # collapse into one resolved stop carrying BOTH ids — not a duplicated option.
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(
+            200,
+            json=stops_payload(
+                ("11", "S Huntington Ave @ Huntington Ave"),
+                ("22", "S Huntington Ave @ Huntington Ave"),
+                ("70", "Maverick Station"),
+            ),
+        )
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve(
+            "116", "S Huntington Ave at Huntington Ave", "Maverick"
+        )
+
+    assert isinstance(result, ResolvedTarget)
+    assert set(result.stop_ids) == {"11", "22"}  # both platforms kept
+    assert result.stop_name == "S Huntington Ave @ Huntington Ave"
+
+
+async def test_distinctive_word_wins_over_fuzzy_noise(mock_routes):
+    # "Eutaw St" should resolve to the one stop containing "Eutaw" — not get lost
+    # among stops that merely share the common word "St".
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(
+            200,
+            json=stops_payload(
+                ("1", "Meridian St @ Eutaw St"),
+                ("2", "Western Ave @ Cooper St"),
+                ("3", "Salem Tnpk @ Ballard St"),
+            ),
+        )
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("116", "Eutaw St", "Maverick")
+
+    assert isinstance(result, ResolvedTarget)
+    assert result.stop_ids == ("1",)
+    assert result.stop_name == "Meridian St @ Eutaw St"
+
+
+async def test_unknown_stop_yields_stop_clarification(mock_routes):
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(
+            200, json=stops_payload(("70", "Maverick Station"), ("72", "Wonderland"))
+        )
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("116", "Zxqw Plaza", "Maverick")
+
+    assert isinstance(result, Disambiguation)
+    assert result.kind is DisambiguationKind.STOP
+
+
+# --- Direction disambiguation ----------------------------------------------
+
+
+async def test_missing_direction_asks_which_way(mock_routes):
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("116", "Maverick", direction_hint=None)
+
+    assert isinstance(result, Disambiguation)
+    assert result.kind is DisambiguationKind.DIRECTION
+    # Options come from this route's direction_destinations, carrying direction_id.
+    labels = [opt.label for opt in result.options]
+    assert labels == ["Wonderland", "Maverick"]
+    assert {opt.direction_id for opt in result.options} == {0, 1}
+    # Carried context so the follow-up only needs the direction.
+    assert result.route_id == "116"
+    assert result.stop_ids == ("70",)
+    assert result.stop_name == "Maverick Station"
+
+
+async def test_direction_hint_resolves_other_way(mock_routes):
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("116", "Maverick", "Wonderland")
+
+    assert isinstance(result, ResolvedTarget)
+    assert result.direction_id == 0
+    assert result.direction_destination == "Wonderland"
+
+
+# --- Route clarification ----------------------------------------------------
+
+
+async def test_unrecognized_route_asks_for_clarification(mock_routes):
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("999", "Maverick", "Maverick")
+
+    assert isinstance(result, Disambiguation)
+    assert result.kind is DisambiguationKind.ROUTE
+    assert result.query == "999"
+
+
+async def test_missing_route_asks_for_clarification(mock_routes):
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve(None, "Maverick", "Maverick")
+
+    assert isinstance(result, Disambiguation)
+    assert result.kind is DisambiguationKind.ROUTE
