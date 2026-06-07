@@ -8,9 +8,12 @@ from zoneinfo import ZoneInfo
 from dexter.agent.formatting import format_node, format_outcome
 from dexter.agent.state import Fallback, ServiceError, SkillUnavailable
 from dexter.mbta.models import (
+    Alert,
+    AlertsResult,
     Disambiguation,
     DisambiguationKind,
     DisambiguationOption,
+    FacilitiesResult,
     NoServiceResult,
     PredictionResult,
     ResolvedTarget,
@@ -110,9 +113,61 @@ def test_empty_route_disambiguation_is_generic():
     assert text.startswith("Which route did you mean")
 
 
-def test_skill_unavailable_alerts():
-    text = format_outcome(SkillUnavailable(skill="alerts"))
-    assert text == "I can't check service alerts yet — that's coming in a later version."
+def test_skill_unavailable_is_generic():
+    text = format_outcome(SkillUnavailable(skill="something-future"))
+    assert "coming in a later version" in text
+
+
+def test_alerts_reads_header_and_summarizes_rest():
+    result = AlertsResult(
+        scope_label="Blue Line",
+        alerts=(
+            Alert(
+                header="Blue Line suspended between Airport and Bowdoin.",
+                effect="SUSPENSION",
+                severity=9,
+            ),
+            Alert(header="Minor delays on the Blue Line.", effect="DELAY", severity=3),
+            Alert(header="Escalator work at State.", effect="ESCALATOR_CLOSURE", severity=1),
+        ),
+    )
+    text = format_outcome(result)
+    assert "Blue Line suspended between Airport and Bowdoin." in text
+    assert "Minor delays on the Blue Line." in text
+    assert "1 more alert" in text  # the third is summarized, not read out
+
+
+def test_alerts_empty_is_reassuring():
+    text = format_outcome(AlertsResult(scope_label="Red Line", alerts=()))
+    assert "no current service alerts for the Red Line" in text
+
+
+def test_alerts_without_header_falls_back_to_effect():
+    text = format_outcome(
+        AlertsResult(scope_label="116", alerts=(Alert(header="", effect="SUSPENSION", severity=9),))
+    )
+    assert "service is suspended" in text.lower()
+
+
+def test_facilities_outage_reads_header():
+    result = FacilitiesResult(
+        scope_label="Park Street",
+        outages=(
+            Alert(
+                header="Park Street elevator 123 is out of service.",
+                effect="ELEVATOR_CLOSURE",
+                severity=7,
+            ),
+        ),
+    )
+    text = format_outcome(result)
+    assert "Park Street elevator 123 is out of service." in text
+
+
+def test_facilities_empty_is_reassuring():
+    text = format_outcome(FacilitiesResult(scope_label="Park Street", outages=()))
+    assert "no elevator or escalator outages" in text
+    assert "Park Street" in text
 
 
 def test_service_error_busy_and_unavailable():

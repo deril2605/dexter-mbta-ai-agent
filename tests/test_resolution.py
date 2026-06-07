@@ -196,6 +196,89 @@ async def test_direction_hint_resolves_other_way(mock_routes):
     assert result.direction_destination == "Wonderland"
 
 
+# --- Direction inference from two stops -------------------------------------
+
+# Blue Line: dir 0 -> Bowdoin (west), dir 1 -> Wonderland (east). Stop order
+# travelling toward Bowdoin; the eastbound list is just its reverse.
+_BLUE_ORDER_TO_BOWDOIN = ["wonderland", "airport", "maverick", "gov", "bowdoin"]
+_BLUE_STOPS = stops_payload(
+    ("airport", "Airport"),
+    ("gov", "Government Center"),
+    ("maverick", "Maverick"),
+    ("bowdoin", "Bowdoin"),
+    ("wonderland", "Wonderland"),
+)
+
+
+def _ordered_payload(ids: list[str]) -> dict:
+    return {"data": [{"type": "stop", "id": sid, "attributes": {}} for sid in ids]}
+
+
+def _blue_stops_handler(request: httpx.Request) -> httpx.Response:
+    """Serve the route's stops, and the per-direction ordered ids for inference."""
+    direction = request.url.params.get("filter[direction_id]")
+    if direction is None:
+        return httpx.Response(200, json=_BLUE_STOPS)
+    order = _BLUE_ORDER_TO_BOWDOIN if direction == "0" else list(reversed(_BLUE_ORDER_TO_BOWDOIN))
+    return httpx.Response(200, json=_ordered_payload(order))
+
+
+async def test_two_stops_infer_direction_without_asking(mock_routes):
+    # "blue line from airport to government center" — Government Center isn't a
+    # terminus, but it sits toward Bowdoin from Airport, so direction is unambiguous.
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(side_effect=_blue_stops_handler)
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve(
+            "Blue Line", "Airport", direction_hint="Government Center"
+        )
+
+    assert isinstance(result, ResolvedTarget)
+    assert result.direction_id == 0
+    assert result.direction_destination == "Bowdoin"
+    assert result.stop_name == "Airport"
+
+
+async def test_two_stops_reverse_infers_opposite_direction(mock_routes):
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(side_effect=_blue_stops_handler)
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve(
+            "Blue Line", "Government Center", direction_hint="Airport"
+        )
+
+    assert isinstance(result, ResolvedTarget)
+    assert result.direction_id == 1
+    assert result.direction_destination == "Wonderland"
+
+
+async def test_terminus_hint_skips_inference(mock_routes):
+    # A terminus hint resolves directly — it must NOT make the per-direction fetch.
+    stops = mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(side_effect=_blue_stops_handler)
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("Blue Line", "Airport", "Bowdoin")
+
+    assert isinstance(result, ResolvedTarget)
+    assert result.direction_id == 0
+    assert all("filter[direction_id]" not in str(call.request.url) for call in stops.calls)
+
+
+async def test_destination_off_route_falls_back_to_direction_question(mock_routes):
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(side_effect=_blue_stops_handler)
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("Blue Line", "Airport", "Harvard")
+
+    assert isinstance(result, Disambiguation)
+    assert result.kind is DisambiguationKind.DIRECTION
+
+
+async def test_same_origin_and_destination_falls_back(mock_routes):
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(side_effect=_blue_stops_handler)
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("Blue Line", "Airport", "Airport")
+
+    assert isinstance(result, Disambiguation)
+    assert result.kind is DisambiguationKind.DIRECTION
+
+
 # --- Route clarification ----------------------------------------------------
 
 

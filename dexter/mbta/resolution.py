@@ -89,6 +89,15 @@ def _contains_all(name: str, tokens: list[str]) -> bool:
     return all(t in name_tokens for t in tokens)
 
 
+def _first_index(ordered_ids: list[str], ids: tuple[str, ...]) -> int | None:
+    """Earliest position in ``ordered_ids`` of any of a stop's platform ``ids``."""
+    wanted = set(ids)
+    for i, sid in enumerate(ordered_ids):
+        if sid in wanted:
+            return i
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class _StopGroup:
     """One human-facing stop name and every stop_id that shares it.
@@ -121,6 +130,28 @@ class Resolver:
         self._routes = route_cache
         self._stops_ttl = stops_ttl
 
+    @property
+    def client(self) -> MBTAClient:
+        """The shared MBTA client (so the agent can build sibling skill services)."""
+        return self._client
+
+    @property
+    def routes(self) -> RouteCache:
+        """The shared route cache (reused by the alerts/facilities skills)."""
+        return self._routes
+
+    async def stops_for(self, route_id: str, location: str | None) -> tuple[str, ...] | None:
+        """Resolve a location to concrete stop_ids on a route, or None if unclear.
+
+        Used by the alerts skill to optionally narrow alerts to a stop. Unlike
+        :meth:`resolve` it does no direction handling and returns ids only.
+        """
+        if not location or not location.strip():
+            return None
+        groups = _group_by_name(await self._fetch_stops(route_id))
+        winner = _match_stop(location, groups).winner
+        return winner.ids if winner else None
+
     async def resolve(
         self,
         route_token: str | None,
@@ -150,8 +181,10 @@ class Resolver:
                 query=location,
             )
 
-        # Step 3 — direction (handled by _complete, shared with resolve_with_ids).
-        return _complete(route, outcome.winner.ids, outcome.winner.name, direction_hint)
+        # Step 3 — direction: a terminus/direction hint, else inferred from a
+        # destination stop ("airport to Government Center" -> the Bowdoin direction).
+        direction_id = await self._direction_for(route, outcome.winner, groups, direction_hint)
+        return _complete(route, outcome.winner.ids, outcome.winner.name, direction_id)
 
     async def resolve_with_ids(
         self,
@@ -169,7 +202,10 @@ class Resolver:
         route = await self._routes.get(route_id)
         if route is None:  # route cache changed under us — ask again
             return Disambiguation(kind=DisambiguationKind.ROUTE)
-        return _complete(route, stop_ids, stop_name, direction_hint)
+        # A disambiguation answer carries a concrete direction (the chosen option's
+        # label) — match it directly; no destination-stop inference needed here.
+        direction_id = _resolve_direction(route, direction_hint)
+        return _complete(route, stop_ids, stop_name, direction_id)
 
     async def _fetch_stops(self, route_id: str) -> list[Stop]:
         data = await self._client.get_json(
@@ -179,12 +215,70 @@ class Resolver:
         )
         return [Stop.from_jsonapi(r) for r in data.get("data", [])]
 
+    async def _fetch_ordered_stop_ids(self, route_id: str, direction_id: int) -> list[str]:
+        """Stop ids for one direction, in travel order.
+
+        MBTA returns ``/stops`` sorted by sequence when filtered by route+direction,
+        which is what lets us tell whether the origin comes before the destination.
+        """
+        data = await self._client.get_json(
+            "/stops",
+            params={
+                "filter[route]": route_id,
+                "filter[direction_id]": direction_id,
+                "fields[stop]": _STOP_FIELDS,
+            },
+            cache_ttl=self._stops_ttl,
+        )
+        return [r["id"] for r in data.get("data", []) if r.get("id")]
+
+    async def _direction_for(
+        self,
+        route: Route,
+        origin: _StopGroup,
+        groups: list[_StopGroup],
+        direction_hint: str | None,
+    ) -> int | None:
+        """Direction from a terminus/direction hint, else inferred from a destination stop.
+
+        A hint like "Bowdoin" or "inbound" matches a terminus/direction name directly
+        (the fast path). A hint that is instead an *intermediate* stop ("Government
+        Center") is resolved as a stop on the route and the direction is inferred from
+        stop order — so a plain "from A to B" no longer needs the line's endpoint named.
+        """
+        direct = _resolve_direction(route, direction_hint)
+        if direct is not None:
+            return direct
+        if not direction_hint or not direction_hint.strip():
+            return None
+        dest = _match_stop(direction_hint, groups).winner
+        if dest is None or dest.ids == origin.ids:
+            return None
+        return await self._infer_direction(route, origin, dest)
+
+    async def _infer_direction(
+        self, route: Route, origin: _StopGroup, dest: _StopGroup
+    ) -> int | None:
+        """The direction_id whose stop order has origin before dest, or None if unclear.
+
+        Conservative by design: a direction wins only if both stops appear on it and
+        origin precedes dest. If neither or both directions qualify (branch mismatch,
+        ambiguity), return None so the caller falls back to asking — never guess wrong.
+        """
+        matches = []
+        for direction_id in range(len(route.direction_destinations)):
+            ordered = await self._fetch_ordered_stop_ids(route.id, direction_id)
+            o = _first_index(ordered, origin.ids)
+            d = _first_index(ordered, dest.ids)
+            if o is not None and d is not None and o < d:
+                matches.append(direction_id)
+        return matches[0] if len(matches) == 1 else None
+
 
 def _complete(
-    route: Route, stop_ids: tuple[str, ...], stop_name: str, direction_hint: str | None
+    route: Route, stop_ids: tuple[str, ...], stop_name: str, direction_id: int | None
 ) -> ResolvedTarget | Disambiguation:
-    """Resolve direction for a known route+stop, or ask which direction."""
-    direction_id = _resolve_direction(route, direction_hint)
+    """Build a target for a known route+stop+direction, or ask which direction."""
     if direction_id is None:
         if len(route.direction_destinations) >= 2:
             options = tuple(

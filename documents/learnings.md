@@ -130,6 +130,49 @@ trace**, and we now optimize from data, not hunches.
 
 ---
 
+## Phase 1.5 — Direction inference + alerts/facilities (2026-06-07)
+
+### 13. Infer direction from two stops, instead of asking
+**Problem:** "Blue Line from Airport to Bowdoin" worked (Bowdoin is a terminus), but
+"Airport to Government Center" still asked "toward Wonderland or Bowdoin?" — even though
+two named stops already pin the direction.
+**Decision:** when a direction hint isn't a terminus/direction name, treat it as a
+*destination stop* and infer direction from **stop order** — fetch
+`/stops?filter[route]&filter[direction_id]` (MBTA returns it in travel order) and pick the
+direction where origin precedes destination. Kept it in the LLM-free library, reusing the
+existing `direction_hint` slot (no router change), and made it conservative: infer only
+when exactly one direction qualifies, else fall back to asking — never guess wrong.
+**Outcome:** live-verified the ordering assumption against the API (Airport idx 6 < Government
+Center idx 10 toward Bowdoin; reversed the other way). 5 new regression tests.
+**Lesson:** the API already encodes the answer (stop sequence) — prefer deriving facts from
+its data over adding a turn of conversation.
+
+### 14. One skill became three by reframing facilities as alerts
+**Decision:** built the `alerts` skill (`/alerts` → typed `Alert`, severity/effect mapped to
+plain language in the *formatter*, not the library), then realized **elevator/escalator
+outages are just alerts with closure effects** — so `facilities` reuses the alert parser,
+only adding the `filter[activity]=ALL` quirk (accessibility alerts are hidden by default).
+**Trade-off flagged & decided with Deril:** facilities supports **station-by-name** ("elevator
+at Park Street"), which has no route — so a new bounded `StationCache`
+(`/stops?filter[location_type]=1`) fuzzy-matches *stations only*, a deliberate narrower
+exception to "never fuzzy-match across all stops."
+**Outcome:** alerts + facilities live, stubs removed; +13 tests (116 total), ruff clean.
+
+### 15. Live testing tightened two things tests didn't catch
+**Multi-turn clarify for the new skills:** alerts/facilities originally just re-asked when
+scope was missing (no cross-turn memory). Generalized the `pending`/`clarify` machinery with a
+`pending_intent` field so `clarify_node` dispatches the answer back to the skill that asked —
+"any alerts?" → "the Blue Line" now resolves.
+**Alert relevance:** a live session showed "is the Blue Line running?" leading with a generic
+`NOTICE` ("predictions temporarily unavailable") that tied on severity with the real track-work
+`DELAY`. **Decision:** drop purely-informational effects (`NOTICE`/`SUMMARY`) in the alerts
+skill, so disruptions always lead and a line with only a feed-notice reads as clear (Green Line
+→ "no current service alerts"). Live-verified.
+**Lesson:** unit tests prove the wiring; **driving the real app surfaces relevance/UX problems
+the mocks can't** — sort ties and "technically-correct-but-noisy" data only show up live.
+
+---
+
 ## TL;DR — lessons worth carrying forward
 
 - **Measure before optimizing.** Tracing turned a "latency vibe" into "the LLM is 98% of

@@ -193,11 +193,98 @@ async def test_fresh_query_escapes_a_pending_clarification(respx_mock):
     await client.aclose()
 
 
-async def test_alerts_intent_routes_to_stub(respx_mock):
+async def test_alerts_intent_returns_alerts(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "type": "alert",
+                        "id": "1",
+                        "attributes": {
+                            "effect": "DELAY",
+                            "severity": 5,
+                            "header": "Blue Line delays of about 10 minutes.",
+                            "short_header": "Blue Line delays of about 10 minutes.",
+                        },
+                    }
+                ]
+            },
+        )
+    )
     router = FakeRouter({"is the Blue Line down?": RouterSlots(intent="alerts", route="Blue Line")})
     graph, client = build(respx_mock, router)
     turn = await graph.ainvoke({"message": "is the Blue Line down?"}, config("s3"))
-    assert turn["reply"] == "I can't check service alerts yet — that's coming in a later version."
+    assert "Blue Line delays of about 10 minutes." in turn["reply"]
+    assert turn["needs_input"] is False
+    await client.aclose()
+
+
+def one_alert(effect: str, severity: int, header: str) -> dict:
+    return {
+        "data": [
+            {
+                "type": "alert",
+                "id": "1",
+                "attributes": {
+                    "effect": effect,
+                    "severity": severity,
+                    "header": header,
+                    "short_header": header,
+                },
+            }
+        ]
+    }
+
+
+async def test_alerts_clarifies_missing_route_across_turns(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(200, json=one_alert("DELAY", 5, "Blue Line minor delays."))
+    )
+    router = FakeRouter(
+        {
+            "any alerts?": RouterSlots(intent="alerts"),
+            "the Blue Line": RouterSlots(intent="alerts", route="Blue Line", follow_up=True),
+        }
+    )
+    graph, client = build(respx_mock, router)
+
+    turn1 = await graph.ainvoke({"message": "any alerts?"}, config("al"))
+    assert turn1["needs_input"] is True
+    assert "Which route" in turn1["reply"]
+
+    # The answer alone resolves — the skill remembered it was waiting on a route.
+    turn2 = await graph.ainvoke({"message": "the Blue Line"}, config("al"))
+    assert "Blue Line minor delays." in turn2["reply"]
+    assert turn2["needs_input"] is False
+    await client.aclose()
+
+
+async def test_facilities_clarifies_missing_scope_across_turns(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("place-pktrm", "Park Street")))
+    )
+    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(
+            200, json=one_alert("ELEVATOR_CLOSURE", 7, "Park Street elevator unavailable.")
+        )
+    )
+    router = FakeRouter(
+        {
+            "are the elevators working?": RouterSlots(intent="facilities"),
+            "Park Street": RouterSlots(intent="facilities", location="Park Street", follow_up=True),
+        }
+    )
+    graph, client = build(respx_mock, router)
+
+    turn1 = await graph.ainvoke({"message": "are the elevators working?"}, config("fac"))
+    assert turn1["needs_input"] is True
+    assert "Which station or line" in turn1["reply"]
+
+    turn2 = await graph.ainvoke({"message": "Park Street"}, config("fac"))
+    assert "Park Street elevator unavailable." in turn2["reply"]
+    assert turn2["needs_input"] is False
     await client.aclose()
 
 

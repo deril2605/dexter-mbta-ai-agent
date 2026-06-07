@@ -96,6 +96,7 @@ class DisambiguationKind(StrEnum):
     ROUTE = "route"
     STOP = "stop"
     DIRECTION = "direction"
+    FACILITY_SCOPE = "facility_scope"  # a station or line, for the facilities skill
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,3 +152,48 @@ class NoServiceResult:
     """No remaining real-time or scheduled service for this target today."""
 
     target: ResolvedTarget
+
+
+@dataclass(frozen=True, slots=True)
+class Alert:
+    """A single MBTA service alert, reduced to what we speak.
+
+    ``effect`` and ``severity`` are the raw MBTA values; the agent's formatter maps
+    them to plain language (invariant: the library returns data, never prose).
+    """
+
+    header: str
+    effect: str
+    severity: int = 0
+    lifecycle: str = ""
+
+    @classmethod
+    def from_jsonapi(cls, resource: dict[str, Any]) -> Alert:
+        attrs = resource.get("attributes", {})
+        header = attrs.get("short_header") or attrs.get("header") or ""
+        try:
+            severity = int(attrs.get("severity"))
+        except (TypeError, ValueError):
+            severity = 0
+        return cls(
+            header=header.strip(),
+            effect=(attrs.get("effect") or "").strip(),
+            severity=severity,
+            lifecycle=(attrs.get("lifecycle") or "").strip(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AlertsResult:
+    """Active service alerts for a scope (a route, optionally narrowed to a stop)."""
+
+    scope_label: str
+    alerts: tuple[Alert, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class FacilitiesResult:
+    """Elevator/escalator outages for a scope (a station or a route)."""
+
+    scope_label: str
+    outages: tuple[Alert, ...] = ()

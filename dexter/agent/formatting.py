@@ -11,8 +11,11 @@ from datetime import datetime
 
 from dexter.mbta._timeutils import MBTA_TZ
 from dexter.mbta.models import (
+    Alert,
+    AlertsResult,
     Disambiguation,
     DisambiguationKind,
+    FacilitiesResult,
     NoServiceResult,
     PredictionResult,
     ResolvedTarget,
@@ -41,6 +44,10 @@ def format_outcome(outcome) -> str:
             return _format_schedule(outcome)
         case NoServiceResult():
             return _format_no_service(outcome)
+        case AlertsResult():
+            return _format_alerts(outcome)
+        case FacilitiesResult():
+            return _format_facilities(outcome)
         case Disambiguation():
             return _format_disambiguation(outcome)
         case SkillUnavailable():
@@ -110,6 +117,70 @@ def _clock(when: datetime) -> str:
     return local.strftime("%I:%M %p").lstrip("0")
 
 
+# --- alerts / facilities ----------------------------------------------------
+
+# Raw MBTA effect -> a short, speakable lead used when an alert has no header text.
+_EFFECT_PHRASING = {
+    "SUSPENSION": "service is suspended",
+    "SHUTTLE": "shuttle buses are replacing service",
+    "STATION_CLOSURE": "a station is closed",
+    "STOP_CLOSURE": "a stop is closed",
+    "DETOUR": "there's a detour",
+    "DELAY": "there are delays",
+    "SERVICE_CHANGE": "there's a service change",
+    "SCHEDULE_CHANGE": "there's a schedule change",
+    "TRACK_CHANGE": "there's a track change",
+    "SNOW_ROUTE": "snow routing is in effect",
+    "ELEVATOR_CLOSURE": "an elevator is out of service",
+    "ESCALATOR_CLOSURE": "an escalator is out of service",
+}
+
+# How many individual alerts we'll read out before summarizing the rest.
+_MAX_SPOKEN_ALERTS = 2
+
+
+def _format_alerts(result: AlertsResult) -> str:
+    scope = _speakable(result.scope_label)
+    if not result.alerts:
+        return f"There are no current service alerts for the {scope}."
+
+    spoken = [_alert_sentence(a) for a in result.alerts[:_MAX_SPOKEN_ALERTS]]
+    text = " ".join(spoken)
+    remaining = len(result.alerts) - len(spoken)
+    if remaining > 0:
+        text += f" There {'is' if remaining == 1 else 'are'} {remaining} more alert"
+        text += "." if remaining == 1 else "s."
+    return text
+
+
+def _format_facilities(result: FacilitiesResult) -> str:
+    scope = _speakable(result.scope_label)
+    if not result.outages:
+        return f"There are no elevator or escalator outages for the {scope} right now."
+    spoken = [_alert_sentence(o) for o in result.outages[:_MAX_SPOKEN_ALERTS]]
+    text = " ".join(spoken)
+    remaining = len(result.outages) - len(spoken)
+    if remaining > 0:
+        text += f" There {'is' if remaining == 1 else 'are'} {remaining} more outage"
+        text += "." if remaining == 1 else "s."
+    return text
+
+
+def _alert_sentence(alert: Alert) -> str:
+    """Prefer the MBTA's human-written header; fall back to effect phrasing."""
+    if alert.header:
+        return _ensure_period(_speakable(alert.header))
+    phrase = _EFFECT_PHRASING.get(alert.effect, "there's a service alert")
+    return _ensure_period(phrase[0].upper() + phrase[1:])
+
+
+def _ensure_period(text: str) -> str:
+    text = text.strip()
+    if text and text[-1] not in ".!?":
+        text += "."
+    return text
+
+
 # --- disambiguation ---------------------------------------------------------
 
 
@@ -122,6 +193,8 @@ def _format_disambiguation(disambiguation: Disambiguation) -> str:
             options = [_speakable(o.label) for o in disambiguation.options]
             return "Which stop did you mean — " + _or_join(options) + "?"
         return "Which stop did you mean?"
+    if disambiguation.kind == DisambiguationKind.FACILITY_SCOPE:
+        return "Which station or line did you mean — for example, Park Street or the Red Line?"
     # ROUTE
     if disambiguation.options:
         options = [f"the {_speakable(o.label)}" for o in disambiguation.options]
@@ -131,16 +204,11 @@ def _format_disambiguation(disambiguation: Disambiguation) -> str:
 
 # --- agent outcomes ---------------------------------------------------------
 
-_SKILL_TEXT = {
-    "alerts": "I can't check service alerts yet — that's coming in a later version.",
-    "facilities": "I can't check elevators or escalators yet — that's coming in a later version.",
-}
-
 
 def _format_skill_unavailable(outcome: SkillUnavailable) -> str:
-    return _SKILL_TEXT.get(
-        outcome.skill, "That isn't available yet — it's coming in a later version."
-    )
+    # Alerts and facilities are now implemented; this remains for any future
+    # scaffolded-but-unbuilt skill.
+    return "That isn't available yet — it's coming in a later version."
 
 
 def _format_service_error(outcome: ServiceError) -> str:

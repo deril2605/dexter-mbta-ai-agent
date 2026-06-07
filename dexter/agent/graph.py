@@ -17,8 +17,12 @@ import functools
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from dexter.mbta.alerts import AlertsService
+from dexter.mbta.facilities import FacilitiesService
 from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver
+from dexter.mbta.routes import RouteCache
+from dexter.mbta.stations import StationCache
 
 from .formatting import format_node
 from .nodes import (
@@ -59,9 +63,22 @@ def build_graph(
     router: Router,
     resolver: Resolver,
     departures: DeparturesService,
+    routes: RouteCache | None = None,
+    alerts: AlertsService | None = None,
+    facilities: FacilitiesService | None = None,
+    stations: StationCache | None = None,
     checkpointer=None,
 ):
-    """Compile the Dexter agent graph. Pass ``checkpointer=False`` to disable it."""
+    """Compile the Dexter agent graph. Pass ``checkpointer=False`` to disable it.
+
+    The alerts/facilities skills default to services built on the resolver's shared
+    MBTA client + route cache, so existing callers need only pass the core three.
+    """
+    routes = routes or resolver.routes
+    alerts = alerts or AlertsService(resolver.client)
+    facilities = facilities or FacilitiesService(resolver.client)
+    stations = stations or StationCache(resolver.client)
+
     builder = StateGraph(AgentState)
 
     builder.add_node("router", functools.partial(router_node, router=router))
@@ -71,10 +88,24 @@ def build_graph(
     )
     builder.add_node(
         "clarify",
-        functools.partial(clarify_node, resolver=resolver, departures=departures),
+        functools.partial(
+            clarify_node,
+            resolver=resolver,
+            departures=departures,
+            routes=routes,
+            alerts=alerts,
+            stations=stations,
+            facilities=facilities,
+        ),
     )
-    builder.add_node("alerts", alerts_node)
-    builder.add_node("facilities", facilities_node)
+    builder.add_node(
+        "alerts",
+        functools.partial(alerts_node, routes=routes, resolver=resolver, alerts=alerts),
+    )
+    builder.add_node(
+        "facilities",
+        functools.partial(facilities_node, routes=routes, stations=stations, facilities=facilities),
+    )
     builder.add_node("fallback", fallback_node)
     builder.add_node("format", format_node)
 

@@ -19,18 +19,23 @@ from dexter.agent.nodes import (
     fallback_node,
     predictions_node,
 )
-from dexter.agent.state import Fallback, ServiceError, SkillUnavailable
+from dexter.agent.state import Fallback, ServiceError
+from dexter.mbta.alerts import AlertsService
 from dexter.mbta.client import MBTAClient
+from dexter.mbta.facilities import FacilitiesService
 from dexter.mbta.models import (
+    AlertsResult,
     Disambiguation,
     DisambiguationKind,
     DisambiguationOption,
+    FacilitiesResult,
     NoServiceResult,
     PredictionResult,
 )
 from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver
 from dexter.mbta.routes import RouteCache
+from dexter.mbta.stations import StationCache
 
 from .conftest import MBTA_BASE_URL, NOW, ROUTES_PAYLOAD, TARGET
 
@@ -237,17 +242,99 @@ async def test_clarify_node_without_pending_falls_back(deps):
     await deps.client.aclose()
 
 
-# --- stub / fallback branches ----------------------------------------------
+# --- alerts / facilities branches ------------------------------------------
 
 
-async def test_alerts_node_is_unavailable():
-    update = await alerts_node({"message": "is the Blue Line down?"})
-    assert update["result"] == SkillUnavailable(skill="alerts")
+def alerts_payload(*alerts: tuple[str, int, str]) -> dict:
+    """Build an /alerts payload from (effect, severity, header) tuples."""
+    return {
+        "data": [
+            {
+                "type": "alert",
+                "id": str(i),
+                "attributes": {"effect": e, "severity": s, "header": h, "short_header": h},
+            }
+            for i, (e, s, h) in enumerate(alerts)
+        ]
+    }
 
 
-async def test_facilities_node_is_unavailable():
-    update = await facilities_node({"message": "elevator at Park St?"})
-    assert update["result"] == SkillUnavailable(skill="facilities")
+async def test_alerts_node_returns_active_alerts(deps):
+    deps.respx.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(
+            200, json=alerts_payload(("DELAY", 5, "Blue Line delays of about 10 minutes."))
+        )
+    )
+    update = await alerts_node(
+        {"route": "Blue Line"},
+        routes=deps.resolver.routes,
+        resolver=deps.resolver,
+        alerts=AlertsService(deps.client),
+        now=NOW,
+    )
+    assert isinstance(update["result"], AlertsResult)
+    assert update["result"].scope_label == "Blue Line"
+    assert len(update["result"].alerts) == 1
+    assert update["needs_input"] is False
+    await deps.client.aclose()
+
+
+async def test_alerts_node_missing_route_asks(deps):
+    update = await alerts_node(
+        {}, routes=deps.resolver.routes, resolver=deps.resolver, alerts=AlertsService(deps.client)
+    )
+    assert isinstance(update["result"], Disambiguation)
+    assert update["result"].kind is DisambiguationKind.ROUTE
+    assert update["needs_input"] is True
+    await deps.client.aclose()
+
+
+async def test_alerts_node_maps_error_to_service_error(deps):
+    deps.respx.get(f"{MBTA_BASE_URL}/alerts").mock(return_value=httpx.Response(503))
+    update = await alerts_node(
+        {"route": "Blue Line"},
+        routes=deps.resolver.routes,
+        resolver=deps.resolver,
+        alerts=AlertsService(deps.client),
+        now=NOW,
+    )
+    assert update["result"] == ServiceError(kind="unavailable")
+    await deps.client.aclose()
+
+
+async def test_facilities_node_returns_outages_for_station(deps):
+    deps.respx.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("place-pktrm", "Park Street")))
+    )
+    deps.respx.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(
+            200,
+            json=alerts_payload(("ELEVATOR_CLOSURE", 7, "Park Street elevator unavailable.")),
+        )
+    )
+    update = await facilities_node(
+        {"location": "Park Street"},
+        routes=deps.resolver.routes,
+        stations=StationCache(deps.client),
+        facilities=FacilitiesService(deps.client),
+        now=NOW,
+    )
+    assert isinstance(update["result"], FacilitiesResult)
+    assert update["result"].scope_label == "Park Street"
+    assert len(update["result"].outages) == 1
+    await deps.client.aclose()
+
+
+async def test_facilities_node_missing_scope_asks(deps):
+    update = await facilities_node(
+        {},
+        routes=deps.resolver.routes,
+        stations=StationCache(deps.client),
+        facilities=FacilitiesService(deps.client),
+    )
+    assert isinstance(update["result"], Disambiguation)
+    assert update["needs_input"] is True
+    await deps.client.aclose()
 
 
 async def test_fallback_node():

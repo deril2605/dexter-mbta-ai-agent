@@ -17,7 +17,9 @@ from dataclasses import dataclass
 from typing import TypedDict
 
 from dexter.mbta.models import (
+    AlertsResult,
     Disambiguation,
+    FacilitiesResult,
     NoServiceResult,
     PredictionResult,
     ResolvedTarget,
@@ -49,6 +51,8 @@ Outcome = (
     PredictionResult
     | ScheduleResult
     | NoServiceResult
+    | AlertsResult
+    | FacilitiesResult
     | Disambiguation
     | SkillUnavailable
     | Fallback
@@ -72,6 +76,7 @@ class AgentState(TypedDict, total=False):
     last_target: ResolvedTarget | None
     pending: Disambiguation | None
     pending_slots: dict | None  # the {route, location, direction_hint} that triggered `pending`
+    pending_intent: str | None  # which skill owns `pending` (predictions/alerts/facilities)
 
     # --- output (per turn) ---
     result: Outcome | None
