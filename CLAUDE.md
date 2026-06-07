@@ -1,6 +1,6 @@
 # CLAUDE.md — Dexter
 
-Project guidance for Claude Code. Read this every session. The full spec is in **`dexter-prd.md`** — that PRD is the source of truth; this file is the working agreement.
+Project guidance for Claude Code. Read this every session. The full spec is in **`documents/dexter-prd.md`** — that PRD is the source of truth; this file is the working agreement.
 
 ## What we're building (Phase 1)
 A natural-language MBTA transit assistant. One skill end-to-end: real-time **predictions** ("next bus/train") with a schedule fallback. Text only. CLI client → FastAPI brain → MBTA core library.
@@ -61,6 +61,6 @@ ruff check . && ruff format .
 The six scenarios in PRD §10 pass against the live API (with key), and the §12 checklist is complete. Don't consider a phase finished until its tests are green and the scenarios verified.
 
 ## Working style
-- Build bottom-up (see `BUILD_PLAN.md`). Finish and test each layer before moving up.
+- Build bottom-up (see `documents/BUILD_PLAN.md`). Finish and test each layer before moving up.
 - After each milestone, stop and report what was built + how you verified it. Don't run ahead through multiple milestones silently.
 - If something in the PRD is ambiguous or seems wrong, flag it and ask — don't guess and build.

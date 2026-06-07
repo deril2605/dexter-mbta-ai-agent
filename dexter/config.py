@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     dexter_port: int = 8000
     log_level: str = "INFO"
 
+    # --- Observability (optional, off by default) ---
+    dexter_tracing: bool = False
+    dexter_tracing_endpoint: str | None = None  # Phoenix OTLP endpoint; None = default
+
 
 @lru_cache
 def get_settings() -> Settings:

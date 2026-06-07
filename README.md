@@ -9,8 +9,9 @@ get a short, speakable answer grounded in the MBTA V3 API.
 facilities are scaffolded (the router classifies them, but they reply "coming in a
 later version").
 
-See **`dexter-prd.md`** for the full spec (source of truth), **`CLAUDE.md`** for
-the architecture invariants, and **`BUILD_PLAN.md`** for the milestone plan.
+See **`documents/dexter-prd.md`** for the full spec (source of truth), **`CLAUDE.md`**
+for the architecture invariants, and **`documents/BUILD_PLAN.md`** for the milestone
+plan.
 
 ## Architecture
 
@@ -99,6 +100,25 @@ Tests mock MBTA HTTP with `respx` and fake the LLM — the suite never hits the 
 API. Coverage spans route-first resolution, direction-from-destinations,
 predictions + schedule fallback + no-service, the router, the nodes, speakable
 formatting, multi-turn follow-ups and disambiguation, and the service.
+
+## Observability (optional)
+
+Dexter can emit OpenTelemetry traces to a local **Arize Phoenix** instance to inspect
+each conversation and measure where time goes (router LLM vs MBTA calls). It's
+**off by default** and adds no latency when disabled. See
+**`documents/observability-prd.md`**.
+
+```bash
+uv sync --extra tracing       # install Phoenix + OpenInference instrumentors
+phoenix serve                 # local UI at http://localhost:6006 (separate terminal)
+
+# enable tracing for the service
+DEXTER_TRACING=true uvicorn dexter.service.app:app --port 8000
+```
+
+Then open `http://localhost:6006` — traces are grouped by `session_id`, with spans
+for the LangGraph nodes, the `gpt-5-mini` router call (token counts + latency), and
+each MBTA API call. MBTA/Azure keys are never recorded.
 
 ## Project layout
 

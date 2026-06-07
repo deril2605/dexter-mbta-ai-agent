@@ -18,5 +18,8 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
+# Local Claude Code settings (per-user)
+.claude/settings.local.json
+
 # OS
 .DS_Store

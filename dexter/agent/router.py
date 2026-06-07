@@ -4,9 +4,11 @@ This is the ONLY LLM in Dexter. It classifies the message into
 ``predictions | alerts | facilities | unknown`` and extracts slots — it never
 answers the question or produces any times.
 
-Targets gpt-5-mini on Azure: Chat Completions + tool-calling, using
-``max_completion_tokens`` and no custom ``temperature`` (gpt-5 only accepts the
-default). The deployment name comes from config.
+Targets a small, **non-reasoning** model (gpt-4.1-mini) on Azure: Chat Completions
++ tool-calling, `temperature=0` for deterministic extraction, and a small
+`max_completion_tokens` cap. We switched off gpt-5-mini because its reasoning
+tokens dominated latency (~7s/turn) for what is a trivial extraction task. The
+deployment name comes from config.
 """
 
 from __future__ import annotations
@@ -68,9 +70,17 @@ class RouterSlots:
 class Router:
     """Wraps an (Async)AzureOpenAI client to extract intent + slots."""
 
-    def __init__(self, client, deployment: str, *, max_completion_tokens: int = 2000) -> None:
+    def __init__(
+        self,
+        client,
+        deployment: str,
+        *,
+        temperature: float = 0.0,
+        max_completion_tokens: int = 512,
+    ) -> None:
         self._client = client
         self._deployment = deployment
+        self._temperature = temperature
         self._max_completion_tokens = max_completion_tokens
 
     async def route(self, message: str, *, history: list[dict] | None = None) -> RouterSlots:
@@ -84,6 +94,7 @@ class Router:
             messages=messages,
             tools=[_TOOL],
             tool_choice="required",  # one tool defined -> always our extractor
+            temperature=self._temperature,
             max_completion_tokens=self._max_completion_tokens,
         )
         return _parse_response(response)

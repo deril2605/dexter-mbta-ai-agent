@@ -19,6 +19,11 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+from opentelemetry import trace
+
+# A no-op tracer until an OTel SDK provider is registered (see dexter.observability),
+# so this adds ~no overhead when tracing is off. We never attach auth headers/keys.
+_tracer = trace.get_tracer("dexter.mbta")
 
 
 class MBTAError(Exception):
@@ -112,27 +117,33 @@ class MBTAClient:
         (predictions/schedules) pass no ``cache_ttl`` and are never cached.
         """
         key = _cache_key(path, params)
-        if cache_ttl is not None:
-            cached = self._cache.get(key)
-            if cached is not None:
-                return cached
+        with _tracer.start_as_current_span("mbta.get") as span:
+            span.set_attribute("http.route", path)
 
-        try:
-            response = await self._client.get(path, params=params)
-        except httpx.TimeoutException as exc:
-            raise MBTAUnavailableError(f"MBTA request to {path} timed out") from exc
-        except httpx.RequestError as exc:
-            raise MBTAUnavailableError(f"could not reach the MBTA feed: {exc}") from exc
+            if cache_ttl is not None:
+                cached = self._cache.get(key)
+                if cached is not None:
+                    span.set_attribute("cache_hit", True)
+                    return cached
+            span.set_attribute("cache_hit", False)
 
-        status = response.status_code
-        if status == 429:
-            raise MBTARateLimitError("MBTA feed rate limit hit (HTTP 429)")
-        if status >= 500:
-            raise MBTAUnavailableError(f"MBTA feed returned a server error (HTTP {status})")
-        if status >= 400:
-            raise MBTAError(f"MBTA request to {path} failed (HTTP {status})")
+            try:
+                response = await self._client.get(path, params=params)
+            except httpx.TimeoutException as exc:
+                raise MBTAUnavailableError(f"MBTA request to {path} timed out") from exc
+            except httpx.RequestError as exc:
+                raise MBTAUnavailableError(f"could not reach the MBTA feed: {exc}") from exc
 
-        data = response.json()
-        if cache_ttl is not None:
-            self._cache.set(key, data, cache_ttl)
-        return data
+            status = response.status_code
+            span.set_attribute("http.status_code", status)
+            if status == 429:
+                raise MBTARateLimitError("MBTA feed rate limit hit (HTTP 429)")
+            if status >= 500:
+                raise MBTAUnavailableError(f"MBTA feed returned a server error (HTTP {status})")
+            if status >= 400:
+                raise MBTAError(f"MBTA request to {path} failed (HTTP {status})")
+
+            data = response.json()
+            if cache_ttl is not None:
+                self._cache.set(key, data, cache_ttl)
+            return data

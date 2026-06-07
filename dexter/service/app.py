@@ -43,9 +43,11 @@ async def _build_runtime(app: FastAPI) -> None:
     from dexter.mbta.predictions import DeparturesService
     from dexter.mbta.resolution import Resolver
     from dexter.mbta.routes import RouteCache
+    from dexter.observability import configure_tracing
 
     settings = get_settings()
     logging.basicConfig(level=settings.log_level.upper())
+    configure_tracing(settings)  # opt-in; no-op unless DEXTER_TRACING is set
 
     azure = AsyncAzureOpenAI(
         azure_endpoint=settings.azure_openai_endpoint,
@@ -91,9 +93,12 @@ def create_app(*, graph=None) -> FastAPI:
 
     @app.post("/chat", response_model=ChatResponse)
     async def chat(request: ChatRequest) -> ChatResponse:
+        from dexter.observability import session
+
         config = {"configurable": {"thread_id": request.session_id}}
         try:
-            state = await app.state.graph.ainvoke({"message": request.message}, config)
+            with session(request.session_id):  # groups this turn's spans by conversation
+                state = await app.state.graph.ainvoke({"message": request.message}, config)
         except Exception:  # noqa: BLE001 - never leak a stack trace to the client
             logger.exception("chat turn failed for session %s", request.session_id)
             return ChatResponse(

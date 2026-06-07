@@ -13,6 +13,9 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "langgraph>=0.2",
     "tzdata>=2024.1",
+    # Instrumentation API only (no-op until the optional 'tracing' extra wires up
+    # an SDK exporter). Keeps the app instrumentable with ~zero overhead when off.
+    "opentelemetry-api>=1.20",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +24,15 @@ dev = [
     "pytest-asyncio>=0.23",
     "respx>=0.21",
     "ruff>=0.6",
+    "opentelemetry-sdk>=1.20",  # InMemorySpanExporter for tracing tests
+]
+# Optional local tracing via Arize Phoenix (OpenInference / OpenTelemetry).
+# Heavy; install explicitly: `uv sync --extra tracing`.
+tracing = [
+    "arize-phoenix>=4.0",
+    "arize-phoenix-otel>=0.6",
+    "openinference-instrumentation-langchain>=0.1",
+    "openinference-instrumentation-openai>=0.1",
 ]
 
 [build-system]

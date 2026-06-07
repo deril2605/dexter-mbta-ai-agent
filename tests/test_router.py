@@ -36,7 +36,7 @@ def make_client(tool_args: dict | None = None, *, no_tool: bool = False, bad_jso
     return client, completions
 
 
-async def test_extracts_predictions_slots_and_uses_gpt5_params():
+async def test_extracts_predictions_slots_and_router_params():
     client, completions = make_client(
         {
             "intent": "predictions",
@@ -46,7 +46,7 @@ async def test_extracts_predictions_slots_and_uses_gpt5_params():
             "follow_up": False,
         }
     )
-    slots = await Router(client, "gpt-5-mini").route(
+    slots = await Router(client, "gpt-4.1-mini-1234").route(
         "when's the next 116 from Bennington Street toward Maverick?"
     )
 
@@ -57,11 +57,11 @@ async def test_extracts_predictions_slots_and_uses_gpt5_params():
         direction_hint="Maverick",
         follow_up=False,
     )
-    # gpt-5 correctness: max_completion_tokens (not max_tokens), no temperature.
-    assert completions.kwargs["model"] == "gpt-5-mini"
-    assert completions.kwargs["max_completion_tokens"] == 2000
+    # Deterministic extraction with a small output cap.
+    assert completions.kwargs["model"] == "gpt-4.1-mini-1234"
+    assert completions.kwargs["temperature"] == 0.0
+    assert completions.kwargs["max_completion_tokens"] == 512
     assert "max_tokens" not in completions.kwargs
-    assert "temperature" not in completions.kwargs
     assert completions.kwargs["tool_choice"] == "required"
 
 
