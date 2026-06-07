@@ -4,10 +4,9 @@ A natural-language assistant for MBTA (Boston) transit questions. Ask, in plain
 English — *"when's the next 116 from Bennington Street toward Maverick?"* — and
 get a short, speakable answer grounded in the MBTA V3 API.
 
-**Phase 1 (this repo)** delivers one skill end-to-end: real-time **predictions**
-("next bus/train") with a **schedule fallback**, over a text interface. Alerts and
-facilities are scaffolded (the router classifies them, but they reply "coming in a
-later version").
+**Phase 1 (this repo)** delivers real-time **predictions** ("next bus/train")
+with a **schedule fallback**, over a text interface, plus live **alerts** and
+**facilities** queries for service disruptions and elevator/escalator outages.
 
 See **`documents/dexter-prd.md`** for the full spec (source of truth), **`CLAUDE.md`**
 for the architecture invariants, and **`documents/BUILD_PLAN.md`** for the milestone
@@ -32,7 +31,7 @@ Key invariants (enforced throughout):
 
 - **The MBTA library is LLM-free** — the fast in-process path; no OpenAI calls in
   `dexter/mbta/`.
-- **The LLM never produces times.** `gpt-5-mini` extracts intent + slots only;
+- **The LLM never produces times.** `gpt-4.1-mini` extracts intent + slots only;
   every time is templated from API data in `agent/formatting.py`. This eliminates
   hallucinated departures.
 - **Resolution is route-first:** resolve the route, then fetch only *that route's*
@@ -65,7 +64,7 @@ cp .env.example .env   # then fill in real values (see below)
 | `AZURE_OPENAI_ENDPOINT` | **yes** | e.g. `https://<resource>.openai.azure.com/` or the Foundry `.cognitiveservices.azure.com/` endpoint. |
 | `AZURE_OPENAI_API_KEY` | **yes** | From the resource's *Keys and Endpoint*. |
 | `AZURE_OPENAI_API_VERSION` | **yes** | Copy from the deployment's *View code* panel (e.g. `2025-04-01-preview`). |
-| `AZURE_OPENAI_DEPLOYMENT_ROUTER` | **yes** | The **deployment name** of a small/fast chat model (default: `gpt-5-mini`). |
+| `AZURE_OPENAI_DEPLOYMENT_ROUTER` | **yes** | The **deployment name** of a small/fast chat model (for example `gpt-4.1-mini`). |
 | `DEXTER_HOST` / `DEXTER_PORT` | — | Service bind address (defaults `127.0.0.1:8000`). |
 | `LOG_LEVEL` | — | Defaults `INFO`. |
 
@@ -117,7 +116,7 @@ DEXTER_TRACING=true uvicorn dexter.service.app:app --port 8000
 ```
 
 Then open `http://localhost:6006` — traces are grouped by `session_id`, with spans
-for the LangGraph nodes, the `gpt-5-mini` router call (token counts + latency), and
+for the LangGraph nodes, the `gpt-4.1-mini` router call (token counts + latency), and
 each MBTA API call. MBTA/Azure keys are never recorded.
 
 ## Project layout
@@ -134,8 +133,8 @@ dexter/
 │   ├── models.py          # typed dataclasses (results, disambiguation)
 │   └── _timeutils.py      # MBTA time parsing / service date
 ├── agent/
-│   ├── router.py          # Azure gpt-5-mini tool-calling (intent + slots)
-│   ├── nodes.py           # predictions / clarify / stubs / fallback
+│   ├── router.py          # Azure gpt-4.1-mini tool-calling (intent + slots)
+│   ├── nodes.py           # predictions / clarify / alerts / facilities / fallback
 │   ├── formatting.py      # structured result → speakable text
 │   ├── graph.py           # LangGraph wiring + MemorySaver checkpointer
 │   └── state.py           # conversation state + outcome types
@@ -145,14 +144,9 @@ dexter/
 
 ## Known limitations (Phase 1)
 
-- **Alerts & facilities are stubs** — the router classifies them correctly and
-  Dexter replies that they're coming in a later version (PRD §13).
 - **No route given → generic clarification.** Asking "next bus from Bennington
   Street" (no route) returns *"Which route did you mean?"* rather than naming
   candidate routes, to preserve the route-first invariant (see PRD scenario 5;
   deliberate decision).
-- **Follow-ups reuse the resolved target** and return the current upcoming
-  departures. Precise "the one *after* that" offset semantics is a later-phase
-  refinement — the router's slot schema (PRD §6.2) carries no offset.
 - **Single local user, in-memory conversation state** (`MemorySaver`); state is
   not persisted across service restarts.

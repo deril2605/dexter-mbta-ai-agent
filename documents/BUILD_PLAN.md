@@ -40,8 +40,8 @@ A bottom-up, milestone-by-milestone plan for Claude Code. Build in this order; *
 ## Milestone 4 — Agent state, router, nodes
 - `dexter/agent/state.py`: conversation state (last `{route_id, stop_id, direction_id}`, `pending_disambiguation`).
 - `dexter/agent/router.py`: Azure OpenAI tool-calling for intent + slot extraction (PRD §6.2); classifies `predictions | alerts | facilities | unknown`.
-- `dexter/agent/nodes.py`: `predictions_node` (calls the library), `clarify_node`, `fallback_node`, and **stub** `alerts_node` / `facilities_node` ("coming in a later version").
-- **Verify:** router returns correct intent + slots on sample utterances (mock the LLM); stub branches reachable.
+- `dexter/agent/nodes.py`: `predictions_node` (calls the library), `clarify_node`, `fallback_node`, plus `alerts_node` / `facilities_node`.
+- **Verify:** router returns correct intent + slots on sample utterances (mock the LLM); alerts/facilities branches are reachable.
 
 ## Milestone 5 — Formatting + graph wiring
 - `dexter/agent/formatting.py`: structured results → speakable strings (PRD §6.5). **Times templated, never LLM-generated.**
@@ -62,4 +62,4 @@ A bottom-up, milestone-by-milestone plan for Claude Code. Build in this order; *
 ## Sequencing notes
 - Milestones 1–3 (the LLM-free library) can be fully built and tested with **zero LLM calls** — get this rock-solid first; it's the foundation and the cheapest to test.
 - Only Milestones 4–5 introduce Azure OpenAI. Mock the LLM in unit tests; reserve live LLM + live MBTA for the Milestone 6 end-to-end check.
-- Keep the alerts/facilities branches as stubs throughout — proving the router *routes* them is the Phase 1 goal, not implementing them.
+- This plan originally treated alerts/facilities as later work; the current repo now implements them, so keep this file aligned with the shipped code rather than the earlier stub-only scope.
