@@ -20,6 +20,7 @@ from dexter.mbta.models import (
     PredictionResult,
     ResolvedTarget,
     ScheduleResult,
+    StopNotOnRoute,
 )
 
 from .state import AgentState, ServiceError, SkillUnavailable
@@ -27,12 +28,25 @@ from .state import AgentState, ServiceError, SkillUnavailable
 _VEHICLE_PLURAL = {0: "trains", 1: "trains", 2: "trains", 3: "buses", 4: "ferries"}
 
 
+# Recent turns fed back to the router so it can resolve "it" / "what about …" /
+# follow-ups. Capped to keep the router prompt small (latency) — ~3 exchanges.
+MAX_HISTORY_MESSAGES = 6
+
+
 def format_node(state: AgentState) -> dict:
-    """Graph node: render ``state['result']`` into ``state['reply']``."""
+    """Render ``state['result']`` into ``state['reply']``, and record the turn in history.
+
+    `router_node` runs first each turn and reads the *prior* turns; this end-of-turn
+    append records the current one for next time, so the router never sees the live
+    message twice (it appends that itself).
+    """
     reply = format_outcome(state.get("result"))
     if state.get("reclarify"):
         reply = "Sorry, I didn't catch that. " + reply
-    return {"reply": reply, "reclarify": False}
+    history = list(state.get("history") or [])
+    history.append({"role": "user", "content": state.get("message", "")})
+    history.append({"role": "assistant", "content": reply})
+    return {"reply": reply, "reclarify": False, "history": history[-MAX_HISTORY_MESSAGES:]}
 
 
 def format_outcome(outcome) -> str:
@@ -43,6 +57,8 @@ def format_outcome(outcome) -> str:
             return _format_schedule(outcome)
         case NoServiceResult():
             return _format_no_service(outcome)
+        case StopNotOnRoute():
+            return _format_stop_not_on_route(outcome)
         case AlertsResult():
             return _format_alerts(outcome)
         case FacilitiesResult():
@@ -114,6 +130,57 @@ def _format_no_service(result: NoServiceResult) -> str:
 def _clock(when: datetime) -> str:
     local = when.astimezone(MBTA_TZ)
     return local.strftime("%I:%M %p").lstrip("0")
+
+
+# --- stop not on this route -------------------------------------------------
+
+# Silver Line is branded rapid transit but runs as buses (these route ids).
+_SILVER_LINE_IDS = frozenset({"741", "742", "743", "746", "749", "751"})
+
+
+def _format_stop_not_on_route(outcome: StopNotOnRoute) -> str:
+    stop = _speakable(outcome.stop_name)
+    route = _speakable(outcome.route_label)
+    served = _served_modes(outcome.served_by)
+    if served:
+        return f"{stop} isn't on the {route} — it's served by the {_join_and(served)}."
+    return f"{stop} isn't on the {route}."
+
+
+def _served_modes(routes) -> list[str]:
+    """Group serving routes into speakable modes; collapse a long bus list to 'local buses'."""
+    modes: list[str] = []
+    buses: list[str] = []
+
+    def add(label: str) -> None:
+        if label not in modes:
+            modes.append(label)
+
+    for route in routes:
+        if route.type == 2:  # commuter rail
+            add("Commuter Rail")
+        elif route.id in _SILVER_LINE_IDS or (route.short_name or "").upper().startswith("SL"):
+            add("Silver Line")
+        elif route.id.startswith("Green-"):
+            add("Green Line")
+        elif route.type in (0, 1):  # subway / light rail
+            add(route.display_name)  # "Red Line", "Blue Line"
+        else:  # a regular bus route
+            buses.append(route.display_name)
+
+    if len(buses) == 1:
+        add(buses[0])
+    elif buses:
+        add("local buses")
+    return modes
+
+
+def _join_and(items: list[str]) -> str:
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
 
 
 # --- alerts / facilities ----------------------------------------------------
@@ -191,6 +258,11 @@ def _format_disambiguation(disambiguation: Disambiguation) -> str:
         if disambiguation.options:
             options = [_speakable(o.label) for o in disambiguation.options]
             return "Which stop did you mean — " + _or_join(options) + "?"
+        if disambiguation.query:
+            return (
+                f"I couldn't find a stop matching '{_speakable(disambiguation.query)}'. "
+                "Which stop did you mean?"
+            )
         return "Which stop did you mean?"
     if disambiguation.kind == DisambiguationKind.FACILITY_SCOPE:
         return "Which station or line did you mean — for example, Park Street or the Red Line?"
@@ -227,9 +299,14 @@ def _format_fallback() -> str:
 
 
 def _target_descriptor(target: ResolvedTarget) -> str:
+    # Name the boarding stop too, so the rider can see exactly which stop/direction
+    # the answer is for (and catch a wrong stop immediately).
+    parts = [target.route_name]
+    if target.stop_name:
+        parts.append(f"from {_speakable(target.stop_name)}")
     if target.direction_destination:
-        return f"{target.route_name} toward {target.direction_destination}"
-    return target.route_name
+        parts.append(f"toward {target.direction_destination}")
+    return " ".join(parts)
 
 
 def _speakable(label: str) -> str:

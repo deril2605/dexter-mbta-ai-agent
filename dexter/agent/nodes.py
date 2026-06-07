@@ -20,10 +20,10 @@ from dexter.mbta.models import (
     Disambiguation,
     DisambiguationKind,
     FacilitiesResult,
+    StopNotOnRoute,
 )
 from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver, match_disambiguation_option
-from dexter.mbta.routes import RouteCache
 from dexter.mbta.stations import StationCache
 
 from .router import Router
@@ -81,7 +81,6 @@ async def clarify_node(
     *,
     resolver: Resolver,
     departures: DeparturesService,
-    routes: RouteCache | None = None,
     alerts: AlertsService | None = None,
     stations: StationCache | None = None,
     facilities: FacilitiesService | None = None,
@@ -106,7 +105,6 @@ async def clarify_node(
         return await _resolve_alerts(
             state.get("route") or message,
             base.get("location"),
-            routes=routes,
             resolver=resolver,
             alerts=alerts,
             now=now,
@@ -115,7 +113,7 @@ async def clarify_node(
         return await _resolve_facilities(
             state.get("location") or message,
             state.get("route") or message,
-            routes=routes,
+            resolver=resolver,
             stations=stations,
             facilities=facilities,
             now=now,
@@ -178,7 +176,6 @@ async def clarify_node(
 async def alerts_node(
     state: AgentState,
     *,
-    routes: RouteCache,
     resolver: Resolver,
     alerts: AlertsService,
     now: datetime | None = None,
@@ -187,7 +184,6 @@ async def alerts_node(
     return await _resolve_alerts(
         state.get("route"),
         state.get("location"),
-        routes=routes,
         resolver=resolver,
         alerts=alerts,
         now=now,
@@ -197,7 +193,7 @@ async def alerts_node(
 async def facilities_node(
     state: AgentState,
     *,
-    routes: RouteCache,
+    resolver: Resolver,
     stations: StationCache,
     facilities: FacilitiesService,
     now: datetime | None = None,
@@ -206,7 +202,7 @@ async def facilities_node(
     return await _resolve_facilities(
         state.get("location"),
         state.get("route"),
-        routes=routes,
+        resolver=resolver,
         stations=stations,
         facilities=facilities,
         now=now,
@@ -246,7 +242,6 @@ async def _resolve_alerts(
     route_token: str | None,
     location: str | None,
     *,
-    routes: RouteCache,
     resolver: Resolver,
     alerts: AlertsService,
     now: datetime | None,
@@ -254,25 +249,26 @@ async def _resolve_alerts(
     slots = {"route": route_token, "location": location}
     if not route_token or not route_token.strip():
         return _skill_pending(Disambiguation(kind=DisambiguationKind.ROUTE), slots, "alerts")
-    route = await routes.lookup(route_token)
-    if route is None:
+    scope = await resolver.resolve_scope(route_token)  # expands "green line" to all branches
+    if scope is None:
         question = Disambiguation(kind=DisambiguationKind.ROUTE, query=route_token)
         return _skill_pending(question, slots, "alerts")
+    route_id, label = scope
     try:
-        stop_ids = await resolver.stops_for(route.id, location)
-        found = await alerts.get_alerts(route_id=route.id, stop_ids=stop_ids, now=now)
+        stop_ids = await resolver.stops_for(route_id, location)
+        found = await alerts.get_alerts(route_id=route_id, stop_ids=stop_ids, now=now)
     except MBTARateLimitError:
         return {"result": ServiceError(kind="busy"), "needs_input": False}
     except (MBTAUnavailableError, MBTAError):
         return {"result": ServiceError(kind="unavailable"), "needs_input": False}
-    return _skill_result(AlertsResult(scope_label=route.display_name, alerts=found))
+    return _skill_result(AlertsResult(scope_label=label, alerts=found))
 
 
 async def _resolve_facilities(
     location: str | None,
     route_token: str | None,
     *,
-    routes: RouteCache,
+    resolver: Resolver,
     stations: StationCache,
     facilities: FacilitiesService,
     now: datetime | None,
@@ -286,12 +282,11 @@ async def _resolve_facilities(
                 outages = await facilities.get_outages(stop_ids=station.ids, now=now)
                 return _skill_result(FacilitiesResult(scope_label=station.name, outages=outages))
         if route_token and route_token.strip():
-            route = await routes.lookup(route_token)
-            if route is not None:
-                outages = await facilities.get_outages(route_id=route.id, now=now)
-                return _skill_result(
-                    FacilitiesResult(scope_label=route.display_name, outages=outages)
-                )
+            scope = await resolver.resolve_scope(route_token)
+            if scope is not None:
+                route_id, label = scope
+                outages = await facilities.get_outages(route_id=route_id, now=now)
+                return _skill_result(FacilitiesResult(scope_label=label, outages=outages))
     except MBTARateLimitError:
         return {"result": ServiceError(kind="busy"), "needs_input": False}
     except (MBTAUnavailableError, MBTAError):
@@ -323,6 +318,16 @@ async def _resolve_and_fetch(
                 "pending_slots": slots,
                 "pending_intent": "predictions",
                 "needs_input": True,
+            }
+        if isinstance(resolved, StopNotOnRoute):
+            # The stop is a real station, just not on this route — a terminal answer,
+            # not a question; clear any pending so the next turn starts fresh.
+            return {
+                "result": resolved,
+                "pending": None,
+                "pending_slots": None,
+                "pending_intent": None,
+                "needs_input": False,
             }
         result = await departures.get_departures(resolved, now=now, offset=offset)
     except MBTARateLimitError:

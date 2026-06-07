@@ -29,12 +29,15 @@ from .models import (
     ResolvedTarget,
     Route,
     Stop,
+    StopNotOnRoute,
 )
 from .routes import RouteCache
 
 # Per-route /stops cache TTL (PRD §5.7: ~6h).
 DEFAULT_STOPS_TTL = 6 * 60 * 60
 _STOP_FIELDS = "name"
+# Sparse fields for the routes that serve a station (the "it's on the Red Line" hint).
+_SERVING_ROUTE_FIELDS = "short_name,long_name,type"
 
 # Stop fuzzy-match thresholds (rapidfuzz WRatio, 0–100).
 STOP_ACCEPT = 82.0  # a match this strong can win outright
@@ -53,15 +56,16 @@ _GREEN_CARRY = "green line"
 
 # Generic street-type words and connectors. Stripped from a location before
 # checking which stops actually contain its *distinctive* words, so "Eutaw St"
-# is matched on "eutaw" — not on the shared, meaningless "st".
+# is matched on "eutaw" — not on the shared, meaningless "st". NOTE: place-name
+# words like "station"/"square"/"circle" are deliberately NOT here — dropping them
+# conflates distinct places ("South Station" vs "South Street", Central Square).
 _STREET_WORDS = frozenset(
     {
-        "st", "street", "ave", "av", "avenue", "rd", "road", "sq", "square",
+        "st", "street", "ave", "av", "avenue", "rd", "road", "sq",
         "ln", "lane", "pl", "place", "dr", "drive", "ct", "court", "ter", "terr",
         "terrace", "hwy", "highway", "tnpk", "turnpike", "blvd", "boulevard",
-        "pkwy", "parkway", "cir", "circle", "row", "way", "walk", "path", "opp",
+        "pkwy", "parkway", "cir", "row", "way", "walk", "path", "opp",
         "at", "the", "and", "of", "to", "toward", "towards", "near", "by",
-        "station", "stop",
     }
 )  # fmt: skip
 
@@ -95,6 +99,18 @@ def _significant_tokens(norm: str) -> list[str]:
 def _contains_all(name: str, tokens: list[str]) -> bool:
     name_tokens = set(normalize(name).split())
     return all(t in name_tokens for t in tokens)
+
+
+def _token_conflict(user_sig: set[str], name: str) -> bool:
+    """True if a fuzzy candidate is a *different* place, not just a shortening.
+
+    Conflict = the user named a distinctive word the candidate lacks AND the candidate
+    has a distinctive word the user didn't say ("South Station" vs "South Street", or
+    "Bennington St" vs "Meridian St @ Lexington St"). A pure shortening ("Harvard" for
+    "Harvard Square") has no extra token of its own, so it is allowed.
+    """
+    cand_sig = set(_significant_tokens(normalize(name)))
+    return bool(user_sig - cand_sig) and bool(cand_sig - user_sig)
 
 
 def _first_index(ordered_ids: list[str], ids: tuple[str, ...]) -> int | None:
@@ -157,10 +173,17 @@ class Resolver:
         route_cache: RouteCache,
         *,
         stops_ttl: float = DEFAULT_STOPS_TTL,
+        stations=None,
     ) -> None:
         self._client = client
         self._routes = route_cache
         self._stops_ttl = stops_ttl
+        if stations is None:
+            # Deferred import: stations.py imports matching helpers from this module.
+            from .stations import StationCache
+
+            stations = StationCache(client)
+        self._stations = stations
 
     @property
     def client(self) -> MBTAClient:
@@ -171,6 +194,26 @@ class Resolver:
     def routes(self) -> RouteCache:
         """The shared route cache (reused by the alerts/facilities skills)."""
         return self._routes
+
+    async def resolve_scope(self, token: str | None) -> tuple[str, str] | None:
+        """Resolve a route token to ``(route_id, speakable_label)`` for the alerts/facilities
+        skills, or None if unrecognized.
+
+        A generic "Green Line" token expands to all branch routes (comma-joined, which the
+        ``/alerts`` and ``/predictions`` ``filter[route]`` accept) labelled "Green Line", so
+        these skills cover every branch instead of collapsing to one.
+        """
+        if not token or not token.strip():
+            return None
+        if _is_green_line_token(token):
+            branch_ids = sorted(
+                r.id
+                for r in await self._routes.all_routes()
+                if r.id.startswith(_GREEN_BRANCH_PREFIX)
+            )
+            return (",".join(branch_ids), "Green Line") if branch_ids else None
+        route = await self._routes.lookup(token)
+        return (route.id, route.display_name) if route is not None else None
 
     async def stops_for(self, route_id: str, location: str | None) -> tuple[str, ...] | None:
         """Resolve a location to concrete stop_ids on a route, or None if unclear.
@@ -183,6 +226,32 @@ class Resolver:
         groups = _group_by_name(await self._fetch_stops(route_id))
         winner = _match_stop(location, groups).winner
         return winner.ids if winner else None
+
+    async def _station_not_on_route(
+        self, location: str | None, route_ids: set[str], route_label: str
+    ) -> StopNotOnRoute | None:
+        """If the location is a real station the asked-for route doesn't serve, say so.
+
+        Authoritative check: ask the API which routes serve the matched station and see
+        whether any requested route is among them — robust for both subway (parent-station
+        stops) and buses (child-platform stops).
+        """
+        station = await self._stations.lookup(location)
+        if station is None or not station.ids:
+            return None
+        serving = await self._serving_routes(station.ids[0])
+        if route_ids & {r.id for r in serving}:
+            return None  # the route does serve this station — not a wrong-line case
+        return StopNotOnRoute(
+            stop_name=station.name, route_label=route_label, served_by=tuple(serving)
+        )
+
+    async def _serving_routes(self, station_id: str) -> list[Route]:
+        data = await self._client.get_json(
+            "/routes",
+            params={"filter[stop]": station_id, "fields[route]": _SERVING_ROUTE_FIELDS},
+        )
+        return [Route.from_jsonapi(r) for r in data.get("data", [])]
 
     async def resolve(
         self,
@@ -206,6 +275,9 @@ class Resolver:
         groups = _group_by_name(await self._fetch_stops(route.id))
         outcome = _match_stop(location, groups)
         if outcome.winner is None:
+            not_on = await self._station_not_on_route(location, {route.id}, route.display_name)
+            if not_on is not None:
+                return not_on
             options = tuple(
                 DisambiguationOption(label=g.name, stop_ids=g.ids) for g in outcome.candidates
             )
@@ -279,6 +351,11 @@ class Resolver:
 
         outcome = _match_stop(location, _group_by_name(all_stops))
         if outcome.winner is None:
+            not_on = await self._station_not_on_route(
+                location, {b.id for b in branches}, "Green Line"
+            )
+            if not_on is not None:
+                return not_on
             options = tuple(
                 DisambiguationOption(
                     label=g.name,
@@ -490,15 +567,16 @@ def _match_stop(location: str, groups: list[_StopGroup]) -> _StopOutcome:
             return _StopOutcome(winner=None, candidates=tuple(contained[:MAX_STOP_CANDIDATES]))
 
     plausible = [(score, group) for score, group in scored if score >= STOP_CANDIDATE_FLOOR]
-
     if not plausible:
         return _StopOutcome(winner=None, candidates=())
-    if len(plausible) == 1:
-        return _StopOutcome(winner=plausible[0][1], candidates=())
 
     best_score, best_group = plausible[0]
-    second_score = plausible[1][0]
-    if best_score >= STOP_ACCEPT and (best_score - second_score) >= STOP_MARGIN:
+    second_score = plausible[1][0] if len(plausible) > 1 else 0.0
+    # A fuzzy match wins only when it's strong, clearly ahead, and not actually a
+    # *different* place. A lone weak (60–82) match becomes a candidate to confirm —
+    # never a silent winner (that's what picked "South Street" for "south station").
+    confident = best_score >= STOP_ACCEPT and (best_score - second_score) >= STOP_MARGIN
+    if confident and not _token_conflict(set(significant), best_group.name):
         return _StopOutcome(winner=best_group, candidates=())
 
     candidates = tuple(group for _, group in plausible[:MAX_STOP_CANDIDATES])

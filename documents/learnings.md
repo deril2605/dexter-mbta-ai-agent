@@ -203,6 +203,76 @@ that only shares a token ("Park Street" vs "Mission Park").
 "just worked"; the Green Line's branch structure is the actual data model, and resolution has
 to mirror it. Driving the live app (not mocks) is what exposed it.
 
+### 18. Made it conversational — and finished the Green Line
+A live session exposed that "memory" wasn't what users expect.
+- **Green Line in alerts/facilities:** "is the green line running today" returned "The B …" —
+  the alerts skill still collapsed the line to one branch. Added `Resolver.resolve_scope`, so
+  alerts/facilities span all branches (comma-joined `filter[route]`) and label "Green Line"
+  (predictions already did this). Live: it now surfaces real C- and E-branch alerts.
+- **Conversational memory (the real fix):** the LLM router was only ever shown the *latest*
+  message — the `history` wiring existed but was never populated. `format_node` now records each
+  turn into `state["history"]` (capped to ~3 exchanges, persisted by the checkpointer), so the
+  router resolves "it", "wb blue line", and cross-skill follow-ups. Live-verified the exact
+  reported thread.
+- **Escape stale clarifications:** the graph routes to `clarify` only when the turn is actually
+  *answering* the pending question (follow-up, same skill); a new/standalone/topic-switching
+  question escapes instead of being swallowed as a stop-name answer.
+- **Lesson:** "multi-turn" is two layers — a deterministic slot store (prevents hallucinated
+  facts) *and* LLM conversation context (makes it feel like a chat). We'd built only the first;
+  users expect both.
+- **Known follow-up:** LangGraph warns about msgpack-serializing the result dataclasses
+  (`Alert`/`AlertsResult`) held in checkpointed state — benign now, but register the types or
+  drop `result` from the checkpoint before it's enforced.
+
+### 19. Feeding history isn't enough — tell the model to use it (and don't gate on flaky flags)
+Right after wiring conversation history in, "is the Blue Line running?" → "when's the next train
+to Government Center" still asked "which route?". Two follow-on fixes:
+- **Prompt must instruct context use.** The router was *given* history but its prompt said to
+  extract the route "exactly as the user said it" and "leave a slot out when absent" — so it
+  refused to carry an implied route. Added an explicit instruction to carry established slots
+  (above all the route) from earlier turns. Live: it now infers "Blue Line", and treats
+  "to Government Center" as a destination — then a boarding stop ("from airport") triggers the
+  two-stop direction inference end to end.
+- **Don't gate control flow on an unreliable LLM flag.** The clarify-escape gate first required
+  `follow_up=True`, but the eval showed the model marks short answers ("the 116", "toward
+  Maverick", "blue") as `follow_up=False` inconsistently — which would make real disambiguation
+  answers *escape* and lose context. Reworked the gate to clarify by default and escape only on
+  a complete new request or a skill switch — deterministic signals, not the model's mood.
+- **Eval earns its keep:** added history-bearing cases; they're what caught the `follow_up`
+  flakiness and proved context inference. 100% intent / 100% slots across 33 cases.
+- **Carry-over needs a scope rule.** "carry established slots" was too broad: after a Blue Line /
+  Airport turn, "what about the 116 to Maverick" sometimes inherited *Airport* as the 116's
+  boarding stop (nonsensical — the 116 doesn't serve it). A boarding stop is route-specific, so
+  the prompt now carries the *route* but never reuses a *stop* across a route change. Added a
+  `forbid` mechanism to the eval (slots that must stay empty) + a case for this; two live runs
+  at 100% confirmed it's stable, not just lucky.
+- **Name the boarding stop in the answer.** The prediction/schedule reply now reads "The next 116
+  **from [stop]** toward Maverick is in …" (shared `_target_descriptor`). Beyond being clearer,
+  it makes a wrong stop *visible* — the first live test surfaced "Bennington Street" resolving to
+  "Meridian St at Lexington St" on the 116, a pre-existing match bug that had been invisible.
+  Lesson: show the resolved entity, not just the answer — transparency turns silent
+  mis-resolutions into catchable ones.
+
+### 20. Trustworthy stop resolution: confident-or-ask + cross-route awareness
+Live, "green line from south station" answered for **South Street** — far away, plain wrong.
+Three compounding causes and fixes (the matcher is `rapidfuzz`, not regex; the issue was loose
+*acceptance*):
+- **Tokenization:** "station" was a dropped stopword, so "South Station" → "south" → "South
+  Street". Keep place-name words (station/square/circle) significant.
+- **Confidence gate + conflict guard:** a single weak fuzzy/containment match won silently. Now a
+  fuzzy match wins only when strong AND not a *different place* — `_token_conflict` rejects a
+  candidate that has a distinctive word the user didn't say while lacking one they did ("South
+  Station" vs "South Street"), but allows a pure shortening ("Harvard" for "Harvard Square").
+  Weak matches become candidates/not-found, never silent winners.
+- **Cross-route awareness:** on not-found, check the global `StationCache`; if the location is a
+  real station the route doesn't serve (authoritatively via `/routes?filter[stop]`), return
+  `StopNotOnRoute` → "South Station isn't on the Green Line — it's served by the Red Line, Silver
+  Line, and Commuter Rail." (long bus lists collapse to "local buses").
+- **Lesson:** fuzzy matching needs a confidence floor + a conflict check + a "wrong domain"
+  fallback, or it confidently returns nonsense. Together with showing the boarding stop in replies
+  (#18-era), the assistant now *asks when unsure and is transparent when sure* — the core of "never
+  give wrong info."
+
 ---
 
 ## TL;DR — lessons worth carrying forward

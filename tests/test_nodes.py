@@ -294,7 +294,6 @@ async def test_alerts_node_returns_active_alerts(deps):
     )
     update = await alerts_node(
         {"route": "Blue Line"},
-        routes=deps.resolver.routes,
         resolver=deps.resolver,
         alerts=AlertsService(deps.client),
         now=NOW,
@@ -307,9 +306,7 @@ async def test_alerts_node_returns_active_alerts(deps):
 
 
 async def test_alerts_node_missing_route_asks(deps):
-    update = await alerts_node(
-        {}, routes=deps.resolver.routes, resolver=deps.resolver, alerts=AlertsService(deps.client)
-    )
+    update = await alerts_node({}, resolver=deps.resolver, alerts=AlertsService(deps.client))
     assert isinstance(update["result"], Disambiguation)
     assert update["result"].kind is DisambiguationKind.ROUTE
     assert update["needs_input"] is True
@@ -320,12 +317,28 @@ async def test_alerts_node_maps_error_to_service_error(deps):
     deps.respx.get(f"{MBTA_BASE_URL}/alerts").mock(return_value=httpx.Response(503))
     update = await alerts_node(
         {"route": "Blue Line"},
-        routes=deps.resolver.routes,
         resolver=deps.resolver,
         alerts=AlertsService(deps.client),
         now=NOW,
     )
     assert update["result"] == ServiceError(kind="unavailable")
+    await deps.client.aclose()
+
+
+async def test_alerts_node_green_line_spans_all_branches(deps):
+    # "green line" must cover every branch and read "Green Line", not collapse to one.
+    route = deps.respx.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(200, json=alerts_payload())
+    )
+    update = await alerts_node(
+        {"route": "green line"},
+        resolver=deps.resolver,
+        alerts=AlertsService(deps.client),
+        now=NOW,
+    )
+    assert isinstance(update["result"], AlertsResult)
+    assert update["result"].scope_label == "Green Line"
+    assert route.calls.last.request.url.params["filter[route]"] == "Green-B,Green-C,Green-D,Green-E"
     await deps.client.aclose()
 
 
@@ -341,7 +354,7 @@ async def test_facilities_node_returns_outages_for_station(deps):
     )
     update = await facilities_node(
         {"location": "Park Street"},
-        routes=deps.resolver.routes,
+        resolver=deps.resolver,
         stations=StationCache(deps.client),
         facilities=FacilitiesService(deps.client),
         now=NOW,
@@ -355,7 +368,7 @@ async def test_facilities_node_returns_outages_for_station(deps):
 async def test_facilities_node_missing_scope_asks(deps):
     update = await facilities_node(
         {},
-        routes=deps.resolver.routes,
+        resolver=deps.resolver,
         stations=StationCache(deps.client),
         facilities=FacilitiesService(deps.client),
     )

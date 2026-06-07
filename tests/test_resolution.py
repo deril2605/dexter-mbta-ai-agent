@@ -12,8 +12,14 @@ import httpx
 import pytest
 
 from dexter.mbta.client import MBTAClient
-from dexter.mbta.models import Disambiguation, DisambiguationKind, ResolvedTarget
-from dexter.mbta.resolution import Resolver
+from dexter.mbta.models import (
+    Disambiguation,
+    DisambiguationKind,
+    ResolvedTarget,
+    Stop,
+    StopNotOnRoute,
+)
+from dexter.mbta.resolution import Resolver, _group_by_name, _match_stop
 from dexter.mbta.routes import RouteCache
 
 from .conftest import MBTA_BASE_URL, ROUTES_PAYLOAD
@@ -299,6 +305,26 @@ async def test_same_origin_and_destination_falls_back(mock_routes):
     assert result.kind is DisambiguationKind.DIRECTION
 
 
+# --- Confident-or-ask matching (no silent wrong matches) --------------------
+
+
+def test_match_stop_rejects_conflicting_token():
+    # "south station" must NOT silently win "South Street" (station vs street conflict).
+    groups = _group_by_name(
+        [Stop(id="1", name="South Street"), Stop(id="2", name="Boston College")]
+    )
+    outcome = _match_stop("south station", groups)
+    assert outcome.winner is None
+
+
+def test_match_stop_allows_shortening():
+    # "Harvard Square" -> "Harvard" is a shortening (no conflicting token), so it wins.
+    groups = _group_by_name([Stop(id="1", name="Harvard"), Stop(id="2", name="Central")])
+    outcome = _match_stop("harvard square", groups)
+    assert outcome.winner is not None
+    assert outcome.winner.name == "Harvard"
+
+
 # --- Green Line: a generic line token, stop picks the branch ----------------
 
 _GREEN_BRANCH_STOPS = {
@@ -371,6 +397,70 @@ async def test_green_line_trunk_stop_offers_all_destinations(mock_routes):
     assert result.route_id == "Green-B,Green-C,Green-D,Green-E"
     labels = {o.label for o in result.options}
     assert {"Boston College", "Heath Street", "Riverside"} <= labels
+
+
+async def test_green_line_south_station_reports_not_on_line(respx_mock):
+    # The reported bug: "green line from south station" must say South Station isn't on
+    # the Green Line (it's Red/Silver/CR) — never fuzzy-match to "South Street".
+    def routes_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("filter[stop]"):  # routes serving South Station
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "type": "route",
+                            "id": "Red",
+                            "attributes": {"short_name": "", "long_name": "Red Line", "type": 1},
+                        },
+                        {
+                            "type": "route",
+                            "id": "741",
+                            "attributes": {
+                                "short_name": "SL1",
+                                "long_name": "Silver Line SL1",
+                                "type": 3,
+                            },
+                        },
+                        {
+                            "type": "route",
+                            "id": "CR-Worcester",
+                            "attributes": {
+                                "short_name": "",
+                                "long_name": "Worcester Line",
+                                "type": 2,
+                            },
+                        },
+                    ]
+                },
+            )
+        return httpx.Response(200, json=ROUTES_PAYLOAD)
+
+    def stops_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("filter[location_type]") == "1":  # parent stations
+            return httpx.Response(
+                200,
+                json=stops_payload(
+                    ("place-sstat", "South Station"), ("place-pktrm", "Park Street")
+                ),
+            )
+        return httpx.Response(  # a Green branch's stops — no South Station
+            200,
+            json=stops_payload(("place-pktrm", "Park Street"), ("place-lake", "Boston College")),
+        )
+
+    respx_mock.get(f"{MBTA_BASE_URL}/routes").mock(side_effect=routes_handler)
+    respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(side_effect=stops_handler)
+
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("green line", "south station", None)
+
+    assert isinstance(result, StopNotOnRoute)
+    assert result.stop_name == "South Station"
+    assert result.route_label == "Green Line"
+    served = {r.id for r in result.served_by}
+    assert "Red" in served
+    assert not (served & {"Green-B", "Green-C", "Green-D", "Green-E"})
 
 
 async def test_green_line_direction_answer_narrows_to_one_branch(mock_routes):

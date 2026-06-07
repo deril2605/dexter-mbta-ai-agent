@@ -155,6 +155,20 @@ class NoServiceResult:
 
 
 @dataclass(frozen=True, slots=True)
+class StopNotOnRoute:
+    """The named location is a real station, but the asked-for route doesn't serve it.
+
+    Lets us say "South Station isn't on the Green Line" instead of fuzzy-matching to a
+    different nearby-sounding stop. ``served_by`` are the routes that actually serve it
+    (the agent groups them into speakable modes).
+    """
+
+    stop_name: str
+    route_label: str
+    served_by: tuple[Route, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Alert:
     """A single MBTA service alert, reduced to what we speak.
 

@@ -24,6 +24,7 @@ from dexter.mbta.models import (
     PredictionResult,
     ResolvedTarget,
     ScheduleResult,
+    StopNotOnRoute,
 )
 
 
@@ -53,6 +54,7 @@ Outcome = (
     | NoServiceResult
     | AlertsResult
     | FacilitiesResult
+    | StopNotOnRoute
     | Disambiguation
     | SkillUnavailable
     | Fallback

@@ -65,7 +65,10 @@ def _slot_ok(key: str, expected, actual) -> bool:
 
 
 async def test_router_intent_and_slot_accuracy(live_router):
-    runs = [(case, await live_router.route(case["utterance"])) for case in CASES]
+    runs = [
+        (case, await live_router.route(case["utterance"], history=case.get("history")))
+        for case in CASES
+    ]
 
     intent_hits = 0
     slot_total = 0
@@ -90,6 +93,14 @@ async def test_router_intent_and_slot_accuracy(live_router):
                 slot_hits += 1
             else:
                 misses.append(f"  slot[{key}] want {want!r} got {got!r}: {utterance!r}")
+        # `forbid`: slots that must NOT be carried over (e.g. a stop from another route).
+        for key in case.get("forbid", []):
+            slot_total += 1
+            got = getattr(slots, key, None)
+            if not got:
+                slot_hits += 1
+            else:
+                misses.append(f"  forbid[{key}] got {got!r} (should be empty): {utterance!r}")
 
     intent_acc = intent_hits / len(runs)
     slot_acc = slot_hits / slot_total if slot_total else 1.0

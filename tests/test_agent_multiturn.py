@@ -96,7 +96,7 @@ async def test_disambiguation_resolves_on_next_turn(respx_mock):
     turn2 = await graph.ainvoke({"message": "toward Wonderland"}, config("s1"))
     assert isinstance(turn2["result"], PredictionResult)
     assert turn2["needs_input"] is False
-    assert "116 toward Wonderland" in turn2["reply"]
+    assert "116 from Maverick Station toward Wonderland" in turn2["reply"]
     assert "Which direction" not in turn2["reply"]
     await client.aclose()
 
@@ -128,7 +128,7 @@ async def test_follow_up_reuses_prior_slots(respx_mock):
     assert isinstance(turn2["result"], PredictionResult)
     assert turn2["result"].target.route_id == "116"
     assert turn2["result"].target.direction_destination == "Wonderland"
-    assert "116 toward Wonderland" in turn2["reply"]
+    assert "116 from Maverick Station toward Wonderland" in turn2["reply"]
     await client.aclose()
 
 
@@ -189,7 +189,7 @@ async def test_fresh_query_escapes_a_pending_clarification(respx_mock):
     )
     assert isinstance(turn2["result"], PredictionResult)
     assert turn2["needs_input"] is False
-    assert "116 toward Wonderland" in turn2["reply"]
+    assert "116 from Maverick Station toward Wonderland" in turn2["reply"]
     await client.aclose()
 
 
@@ -247,6 +247,67 @@ async def test_follow_up_one_after_returns_later_departures(respx_mock):
     assert isinstance(turn2["result"], PredictionResult)
     # The offset slot flowed router -> state -> predictions and advanced the window.
     assert turn2["result"].minutes_away[0] > turn1["result"].minutes_away[0]
+    await client.aclose()
+
+
+class RecordingRouter:
+    """A fake router that records the history handed to it each turn."""
+
+    def __init__(self, mapping: dict[str, RouterSlots]):
+        self._mapping = mapping
+        self.seen_history: list = []
+
+    async def route(self, message: str, *, history=None) -> RouterSlots:
+        self.seen_history.append(history)
+        return self._mapping[message]
+
+
+async def test_router_receives_prior_turns_as_history(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    respx_mock.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=future_predictions(5, 13))
+    )
+    router = RecordingRouter(
+        {
+            "next 116 from Maverick toward Wonderland": RouterSlots(
+                intent="predictions", route="116", location="Maverick", direction_hint="Wonderland"
+            ),
+            "and the one after?": RouterSlots(intent="predictions", follow_up=True),
+        }
+    )
+    graph, client = build(respx_mock, router)
+
+    await graph.ainvoke({"message": "next 116 from Maverick toward Wonderland"}, config("hist"))
+    await graph.ainvoke({"message": "and the one after?"}, config("hist"))
+
+    assert not router.seen_history[0]  # first turn: no prior context
+    contents = [m["content"] for m in router.seen_history[1]]
+    assert "next 116 from Maverick toward Wonderland" in contents  # turn 2 sees turn 1
+    await client.aclose()
+
+
+async def test_new_question_escapes_stale_clarification(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(200, json=one_alert("DELAY", 5, "Blue Line minor delays."))
+    )
+    router = FakeRouter(
+        {
+            # No stop -> predictions leaves a "which stop?" clarification pending.
+            "next blue line": RouterSlots(intent="predictions", route="Blue Line"),
+            # A new, non-follow-up question must escape that pending, not be swallowed.
+            "is the blue line running": RouterSlots(intent="alerts", route="Blue Line"),
+        }
+    )
+    graph, client = build(respx_mock, router)
+
+    turn1 = await graph.ainvoke({"message": "next blue line"}, config("esc2"))
+    assert isinstance(turn1["result"], Disambiguation)  # "Which stop did you mean?"
+
+    turn2 = await graph.ainvoke({"message": "is the blue line running"}, config("esc2"))
+    assert "Blue Line minor delays." in turn2["reply"]  # escaped into alerts
+    assert turn2["needs_input"] is False
     await client.aclose()
 
 

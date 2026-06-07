@@ -9,8 +9,8 @@
 {"utterance": "and the one after that?", "expected": {"intent": "predictions", "follow_up": true, "offset": 1}}
 {"utterance": "what about two after that?", "expected": {"intent": "predictions", "follow_up": true, "offset": 2}}
 {"utterance": "what about toward Wonderland?", "expected": {"intent": "predictions", "follow_up": true, "direction_hint": "Wonderland"}}
-{"utterance": "the 116", "expected": {"intent": "predictions", "route": "116", "follow_up": true}}
-{"utterance": "toward Maverick", "expected": {"intent": "predictions", "direction_hint": "Maverick", "follow_up": true}}
+{"utterance": "the 116", "history": [{"role": "user", "content": "when's the next bus from Bennington Street"}, {"role": "assistant", "content": "Which route did you mean — a bus number like 116, or a line like the Blue Line?"}], "expected": {"intent": "predictions", "route": "116"}}
+{"utterance": "toward Maverick", "history": [{"role": "user", "content": "next 116 from Maverick"}, {"role": "assistant", "content": "Which direction — toward Wonderland or toward Maverick?"}], "expected": {"intent": "predictions", "direction_hint": "Maverick"}}
 {"utterance": "is the Blue Line down?", "expected": {"intent": "alerts", "route": "Blue Line"}}
 {"utterance": "are there any alerts on the Red Line?", "expected": {"intent": "alerts", "route": "Red Line"}}
 {"utterance": "is the green line running today", "expected": {"intent": "alerts", "route": "Green Line"}}
@@ -28,3 +28,7 @@
 {"utterance": "what time is it?", "expected": {"intent": "unknown"}}
 {"utterance": "can you book me an uber", "expected": {"intent": "unknown"}}
 {"utterance": "how much is a subway fare", "expected": {"intent": "unknown"}}
+{"utterance": "when's the next train to Government Center", "history": [{"role": "user", "content": "is the Blue Line running?"}, {"role": "assistant", "content": "The Blue Line is running normally — no current service alerts."}], "expected": {"intent": "predictions", "route": "Blue Line"}}
+{"utterance": "is it running?", "history": [{"role": "user", "content": "any alerts on the Red Line?"}, {"role": "assistant", "content": "There are no current service alerts for the Red Line."}], "expected": {"intent": "alerts", "route": "Red Line"}}
+{"utterance": "what about the one after that?", "history": [{"role": "user", "content": "next 116 from Maverick toward Wonderland"}, {"role": "assistant", "content": "The next 116 toward Wonderland is in 4 minutes, then 12 and 19 minutes."}], "expected": {"intent": "predictions", "follow_up": true, "offset": 1}}
+{"utterance": "what about the 116 to Maverick", "history": [{"role": "user", "content": "when's the next Blue Line train to Government Center"}, {"role": "assistant", "content": "Which stop did you mean?"}, {"role": "user", "content": "airport"}, {"role": "assistant", "content": "The next Blue Line toward Bowdoin should come around 2:03 PM."}], "expected": {"intent": "predictions", "route": "116", "direction_hint": "Maverick"}, "forbid": ["location"]}

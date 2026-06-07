@@ -21,7 +21,6 @@ from dexter.mbta.alerts import AlertsService
 from dexter.mbta.facilities import FacilitiesService
 from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver
-from dexter.mbta.routes import RouteCache
 from dexter.mbta.stations import StationCache
 
 from .formatting import format_node
@@ -44,16 +43,32 @@ _INTENT_TO_NODE = {
 
 
 def _is_fresh_query(state: AgentState) -> bool:
-    """A self-contained new request (route + location) overrides a pending question.
-
-    Without this, a user mid-clarification who changes topic gets stuck, since
-    every turn would be forced through `clarify`.
-    """
+    """A self-contained new request (route + location) overrides a pending question."""
     return bool(state.get("route") and state.get("location"))
 
 
+def _should_clarify(state: AgentState) -> bool:
+    """True unless this turn is clearly a new request rather than an answer.
+
+    A pending clarification consumes the turn by default (the user is answering it).
+    It's escaped only when the turn is a complete new request (route + location) or
+    switches to a different skill with a concrete route/stop — so the user isn't
+    trapped, while short answers ("blue", "toward Maverick") still resolve the
+    question even though the model flags them inconsistently as follow-ups.
+    """
+    if state.get("pending") is None:
+        return False
+    if _is_fresh_query(state):
+        return False
+    intent, pending_intent = state.get("intent"), state.get("pending_intent")
+    switched_skill = bool(intent and pending_intent and intent != pending_intent)
+    if switched_skill and (state.get("route") or state.get("location")):
+        return False
+    return True
+
+
 def _route_after_router(state: AgentState) -> str:
-    if state.get("pending") is not None and not _is_fresh_query(state):
+    if _should_clarify(state):
         return "clarify"
     return _INTENT_TO_NODE.get(state.get("intent", ""), "fallback")
 
@@ -63,7 +78,6 @@ def build_graph(
     router: Router,
     resolver: Resolver,
     departures: DeparturesService,
-    routes: RouteCache | None = None,
     alerts: AlertsService | None = None,
     facilities: FacilitiesService | None = None,
     stations: StationCache | None = None,
@@ -74,7 +88,6 @@ def build_graph(
     The alerts/facilities skills default to services built on the resolver's shared
     MBTA client + route cache, so existing callers need only pass the core three.
     """
-    routes = routes or resolver.routes
     alerts = alerts or AlertsService(resolver.client)
     facilities = facilities or FacilitiesService(resolver.client)
     stations = stations or StationCache(resolver.client)
@@ -92,7 +105,6 @@ def build_graph(
             clarify_node,
             resolver=resolver,
             departures=departures,
-            routes=routes,
             alerts=alerts,
             stations=stations,
             facilities=facilities,
@@ -100,11 +112,13 @@ def build_graph(
     )
     builder.add_node(
         "alerts",
-        functools.partial(alerts_node, routes=routes, resolver=resolver, alerts=alerts),
+        functools.partial(alerts_node, resolver=resolver, alerts=alerts),
     )
     builder.add_node(
         "facilities",
-        functools.partial(facilities_node, routes=routes, stations=stations, facilities=facilities),
+        functools.partial(
+            facilities_node, resolver=resolver, stations=stations, facilities=facilities
+        ),
     )
     builder.add_node("fallback", fallback_node)
     builder.add_node("format", format_node)

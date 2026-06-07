@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from dexter.agent.formatting import format_node, format_outcome
+from dexter.agent.formatting import MAX_HISTORY_MESSAGES, format_node, format_outcome
 from dexter.agent.state import Fallback, ServiceError, SkillUnavailable
 from dexter.mbta.models import (
     Alert,
@@ -17,7 +17,9 @@ from dexter.mbta.models import (
     NoServiceResult,
     PredictionResult,
     ResolvedTarget,
+    Route,
     ScheduleResult,
+    StopNotOnRoute,
 )
 
 EASTERN = ZoneInfo("America/New_York")
@@ -37,22 +39,31 @@ def target(dest="Maverick", route_name="116", route_type=3, stop="Bennington St 
 
 def test_predictions_three_departures():
     text = format_outcome(PredictionResult(target=target(), minutes_away=(4, 12, 19)))
-    assert text == "The next 116 toward Maverick is in 4 minutes, then 12 and 19 minutes."
+    assert text == (
+        "The next 116 from Bennington St at Brooks St toward Maverick "
+        "is in 4 minutes, then 12 and 19 minutes."
+    )
 
 
 def test_predictions_two_departures():
     text = format_outcome(PredictionResult(target=target(), minutes_away=(4, 12)))
-    assert text == "The next 116 toward Maverick is in 4 minutes, then 12 minutes."
+    assert text == (
+        "The next 116 from Bennington St at Brooks St toward Maverick "
+        "is in 4 minutes, then 12 minutes."
+    )
 
 
 def test_predictions_single_departure_and_one_minute():
     text = format_outcome(PredictionResult(target=target(), minutes_away=(1,)))
-    assert text == "The next 116 toward Maverick is in 1 minute."
+    assert text == "The next 116 from Bennington St at Brooks St toward Maverick is in 1 minute."
 
 
 def test_predictions_arriving_now():
     text = format_outcome(PredictionResult(target=target(), minutes_away=(0, 7)))
-    assert text == "The next 116 toward Maverick is arriving now, then 7 minutes."
+    assert text == (
+        "The next 116 from Bennington St at Brooks St toward Maverick "
+        "is arriving now, then 7 minutes."
+    )
 
 
 def test_schedule_clock_time():
@@ -60,7 +71,7 @@ def test_schedule_clock_time():
     text = format_outcome(ScheduleResult(target=target(), next_time=when))
     assert text == (
         "Real-time data isn't available, but per the schedule the next "
-        "116 toward Maverick should come around 11:42 PM."
+        "116 from Bennington St at Brooks St toward Maverick should come around 11:42 PM."
     )
 
 
@@ -113,6 +124,55 @@ def test_empty_route_disambiguation_is_generic():
     assert text.startswith("Which route did you mean")
 
 
+def test_stop_not_found_names_the_query():
+    text = format_outcome(Disambiguation(kind=DisambiguationKind.STOP, query="zxqw plaza"))
+    assert "zxqw plaza" in text.lower()
+    assert "which stop" in text.lower()
+
+
+def _route(rid, *, short="", long="", rtype):
+    return Route(
+        id=rid,
+        short_name=short,
+        long_name=long,
+        type=rtype,
+        direction_names=(),
+        direction_destinations=(),
+    )
+
+
+def test_stop_not_on_route_groups_served_modes():
+    served = (
+        _route("Red", long="Red Line", rtype=1),
+        _route("741", short="SL1", long="Silver Line SL1", rtype=3),
+        _route("CR-Worcester", long="Worcester Line", rtype=2),
+    )
+    text = format_outcome(
+        StopNotOnRoute(stop_name="South Station", route_label="Green Line", served_by=served)
+    )
+    assert text == (
+        "South Station isn't on the Green Line — it's served by the "
+        "Red Line, Silver Line, and Commuter Rail."
+    )
+
+
+def test_stop_not_on_route_without_served_routes():
+    text = format_outcome(StopNotOnRoute(stop_name="South Station", route_label="Green Line"))
+    assert text == "South Station isn't on the Green Line."
+
+
+def test_stop_not_on_route_collapses_many_buses():
+    served = (
+        _route("Green-C", short="C", long="Green Line C", rtype=0),
+        _route("8", short="8", long="Route 8", rtype=3),
+        _route("19", short="19", long="Route 19", rtype=3),
+    )
+    text = format_outcome(
+        StopNotOnRoute(stop_name="Kenmore", route_label="Red Line", served_by=served)
+    )
+    assert text == "Kenmore isn't on the Red Line — it's served by the Green Line and local buses."
+
+
 def test_skill_unavailable_is_generic():
     text = format_outcome(SkillUnavailable(skill="something-future"))
     assert "coming in a later version" in text
@@ -146,7 +206,9 @@ def test_alerts_empty_says_running_normally():
 def test_predictions_empty_window_reads_as_last():
     # An empty PredictionResult only happens when paging past the last departure.
     text = format_outcome(PredictionResult(target=target(), minutes_away=()))
-    assert text == "That's the last 116 toward Maverick I can see right now."
+    assert text == (
+        "That's the last 116 from Bennington St at Brooks St toward Maverick I can see right now."
+    )
 
 
 def test_alerts_without_header_falls_back_to_effect():
@@ -185,6 +247,16 @@ def test_service_error_busy_and_unavailable():
 def test_fallback_is_helpful():
     text = format_outcome(Fallback())
     assert "next bus or train" in text
+
+
+def test_format_node_records_turn_in_history_and_caps():
+    prior = [{"role": "user", "content": "old"}] * MAX_HISTORY_MESSAGES
+    update = format_node({"message": "next 116", "result": Fallback(), "history": prior})
+
+    assert len(update["history"]) == MAX_HISTORY_MESSAGES  # capped
+    assert update["history"][-2] == {"role": "user", "content": "next 116"}
+    assert update["history"][-1]["role"] == "assistant"
+    assert update["history"][-1]["content"] == update["reply"]
 
 
 def test_format_node_adds_reclarify_prefix_and_resets_flag():
