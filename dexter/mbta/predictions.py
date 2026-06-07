@@ -36,11 +36,11 @@ class DeparturesService:
         self._schedules = schedules or SchedulesService(client)
 
     async def get_departures(
-        self, target: ResolvedTarget, *, now: datetime | None = None
+        self, target: ResolvedTarget, *, now: datetime | None = None, offset: int = 0
     ) -> PredictionResult | ScheduleResult | NoServiceResult:
         now = now or datetime.now(UTC)
 
-        prediction = await self._fetch_predictions(target, now)
+        prediction = await self._fetch_predictions(target, now, offset)
         if prediction is not None:
             return prediction
 
@@ -51,7 +51,7 @@ class DeparturesService:
         return NoServiceResult(target=target)
 
     async def _fetch_predictions(
-        self, target: ResolvedTarget, now: datetime
+        self, target: ResolvedTarget, now: datetime, offset: int = 0
     ) -> PredictionResult | None:
         # A filter is mandatory or /predictions returns nothing (PRD §5.4).
         data = await self._client.get_json(
@@ -66,8 +66,12 @@ class DeparturesService:
         )
         minutes = _relative_minutes(data.get("data", []), now)
         if not minutes:
-            return None
-        return PredictionResult(target=target, minutes_away=tuple(minutes[:MAX_DEPARTURES]))
+            return None  # no real-time at all -> caller may fall back to schedule
+        # Page forward by `offset` ("the one after that"). A window that's empty
+        # because offset ran past the end is a valid result — the formatter reads
+        # it as "that's the last one", not as "no service".
+        window = minutes[offset : offset + MAX_DEPARTURES]
+        return PredictionResult(target=target, minutes_away=tuple(window))
 
 
 def _departure_instant(item: dict) -> datetime | None:

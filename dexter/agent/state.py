@@ -71,9 +71,11 @@ class AgentState(TypedDict, total=False):
     location: str | None
     direction_hint: str | None
     follow_up: bool
+    offset: int  # how far a "later departures" follow-up advances ("the one after that")
 
     # --- cross-turn memory ---
     last_target: ResolvedTarget | None
+    last_offset: int  # cumulative departure offset, so "the one after that" keeps paging
     pending: Disambiguation | None
     pending_slots: dict | None  # the {route, location, direction_hint} that triggered `pending`
     pending_intent: str | None  # which skill owns `pending` (predictions/alerts/facilities)

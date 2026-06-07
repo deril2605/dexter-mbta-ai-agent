@@ -1,0 +1,30 @@
+{"utterance": "when's the next 116 from Bennington Street toward Maverick?", "expected": {"intent": "predictions", "route": "116", "location": "Bennington Street", "direction_hint": "Maverick"}}
+{"utterance": "next 116 from Maverick", "expected": {"intent": "predictions", "route": "116", "location": "Maverick"}}
+{"utterance": "when is the next bus on the 1 from Harvard", "expected": {"intent": "predictions", "route": "1", "location": "Harvard"}}
+{"utterance": "blue line from airport to government center", "expected": {"intent": "predictions", "route": "Blue Line", "location": "airport", "direction_hint": "government center"}}
+{"utterance": "next red line train from Park Street toward Alewife", "expected": {"intent": "predictions", "route": "Red Line", "location": "Park Street", "direction_hint": "Alewife"}}
+{"utterance": "when's the next outbound green line at Kenmore", "expected": {"intent": "predictions", "route": "Green Line", "location": "Kenmore", "direction_hint": "outbound"}}
+{"utterance": "next 66 bus", "expected": {"intent": "predictions", "route": "66"}}
+{"utterance": "when does the next orange line leave Back Bay", "expected": {"intent": "predictions", "route": "Orange Line", "location": "Back Bay"}}
+{"utterance": "and the one after that?", "expected": {"intent": "predictions", "follow_up": true, "offset": 1}}
+{"utterance": "what about two after that?", "expected": {"intent": "predictions", "follow_up": true, "offset": 2}}
+{"utterance": "what about toward Wonderland?", "expected": {"intent": "predictions", "follow_up": true, "direction_hint": "Wonderland"}}
+{"utterance": "the 116", "expected": {"intent": "predictions", "route": "116", "follow_up": true}}
+{"utterance": "toward Maverick", "expected": {"intent": "predictions", "direction_hint": "Maverick", "follow_up": true}}
+{"utterance": "is the Blue Line down?", "expected": {"intent": "alerts", "route": "Blue Line"}}
+{"utterance": "are there any alerts on the Red Line?", "expected": {"intent": "alerts", "route": "Red Line"}}
+{"utterance": "is the green line running today", "expected": {"intent": "alerts", "route": "Green Line"}}
+{"utterance": "any delays on the 1 bus?", "expected": {"intent": "alerts", "route": "1"}}
+{"utterance": "is the orange line suspended", "expected": {"intent": "alerts", "route": "Orange Line"}}
+{"utterance": "what's going on with the commuter rail", "expected": {"intent": "alerts"}}
+{"utterance": "is the elevator at Park Street working?", "expected": {"intent": "facilities", "location": "Park Street"}}
+{"utterance": "any escalator outages at South Station", "expected": {"intent": "facilities", "location": "South Station"}}
+{"utterance": "is the elevator at Downtown Crossing out of service", "expected": {"intent": "facilities", "location": "Downtown Crossing"}}
+{"utterance": "are the elevators on the Red Line working", "expected": {"intent": "facilities", "route": "Red Line"}}
+{"utterance": "escalator at Kenmore", "expected": {"intent": "facilities", "location": "Kenmore"}}
+{"utterance": "what's the weather today?", "expected": {"intent": "unknown"}}
+{"utterance": "hi", "expected": {"intent": "unknown"}}
+{"utterance": "tell me a joke", "expected": {"intent": "unknown"}}
+{"utterance": "what time is it?", "expected": {"intent": "unknown"}}
+{"utterance": "can you book me an uber", "expected": {"intent": "unknown"}}
+{"utterance": "how much is a subway fare", "expected": {"intent": "unknown"}}

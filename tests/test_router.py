@@ -90,6 +90,19 @@ async def test_follow_up_flag_parsed():
     assert slots.follow_up is True
 
 
+async def test_offset_parsed_for_later_followup():
+    client, _ = make_client({"intent": "predictions", "follow_up": True, "offset": 1})
+    slots = await Router(client, "gpt-4.1-mini").route("and the one after that?")
+    assert slots.offset == 1
+
+
+async def test_offset_defaults_to_zero_and_bad_values_degrade():
+    client, _ = make_client({"intent": "predictions", "route": "116"})
+    assert (await Router(client, "gpt-4.1-mini").route("next 116")).offset == 0
+    client, _ = make_client({"intent": "predictions", "offset": "lots"})
+    assert (await Router(client, "gpt-4.1-mini").route("next 116")).offset == 0
+
+
 async def test_blank_slots_become_none():
     client, _ = make_client(
         {"intent": "predictions", "route": "116", "location": "   ", "direction_hint": ""}

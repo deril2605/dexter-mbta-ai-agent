@@ -221,6 +221,35 @@ async def test_alerts_intent_returns_alerts(respx_mock):
     await client.aclose()
 
 
+async def test_follow_up_one_after_returns_later_departures(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    respx_mock.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=future_predictions(4, 12, 19, 27))
+    )
+    router = FakeRouter(
+        {
+            "next 116 from Maverick toward Wonderland": RouterSlots(
+                intent="predictions", route="116", location="Maverick", direction_hint="Wonderland"
+            ),
+            "and the one after that?": RouterSlots(intent="predictions", follow_up=True, offset=1),
+        }
+    )
+    graph, client = build(respx_mock, router)
+
+    turn1 = await graph.ainvoke(
+        {"message": "next 116 from Maverick toward Wonderland"}, config("paging")
+    )
+    turn2 = await graph.ainvoke({"message": "and the one after that?"}, config("paging"))
+
+    assert isinstance(turn1["result"], PredictionResult)
+    assert isinstance(turn2["result"], PredictionResult)
+    # The offset slot flowed router -> state -> predictions and advanced the window.
+    assert turn2["result"].minutes_away[0] > turn1["result"].minutes_away[0]
+    await client.aclose()
+
+
 def one_alert(effect: str, severity: int, header: str) -> dict:
     return {
         "data": [

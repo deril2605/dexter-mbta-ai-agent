@@ -45,6 +45,12 @@ packages = ["dexter"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# The router eval hits the live Azure OpenAI router, so it's deselected by default
+# (the normal `pytest` loop stays fast/offline). Run it with `pytest -m eval`.
+addopts = "-m 'not eval'"
+markers = [
+    "eval: opt-in router accuracy eval; calls the live Azure OpenAI router (run with `pytest -m eval`)",
+]
 
 [tool.ruff]
 line-length = 100

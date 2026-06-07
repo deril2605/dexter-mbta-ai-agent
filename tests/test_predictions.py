@@ -104,6 +104,40 @@ async def test_sub_minute_departure_is_zero(respx_mock):
     assert result.minutes_away == (0,)
 
 
+async def test_offset_pages_forward_through_departures(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(
+            200,
+            json=payload(
+                prediction(departure=iso(4), _id="1"),
+                prediction(departure=iso(12), _id="2"),
+                prediction(departure=iso(19), _id="3"),
+                prediction(departure=iso(27), _id="4"),
+            ),
+        )
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        svc = DeparturesService(client)
+        first = await svc.get_departures(TARGET, now=NOW, offset=0)
+        after = await svc.get_departures(TARGET, now=NOW, offset=1)
+
+    assert first.minutes_away == (4, 12, 19)
+    assert after.minutes_away == (12, 19, 27)  # "the one after that" -> later window
+
+
+async def test_offset_past_end_is_empty_window_not_no_service(respx_mock):
+    # Paging past the last real-time departure -> an empty PredictionResult (the
+    # formatter reads it as "that's the last one"), NOT a schedule/no-service fallback.
+    respx_mock.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=payload(prediction(departure=iso(4), _id="1")))
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await DeparturesService(client).get_departures(TARGET, now=NOW, offset=5)
+
+    assert isinstance(result, PredictionResult)
+    assert result.minutes_away == ()
+
+
 async def test_unsorted_predictions_are_ordered_ascending(respx_mock):
     respx_mock.get(f"{MBTA_BASE_URL}/predictions").mock(
         return_value=httpx.Response(

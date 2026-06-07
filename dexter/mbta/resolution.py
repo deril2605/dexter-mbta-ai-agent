@@ -22,6 +22,7 @@ from rapidfuzz import fuzz, process
 
 from .client import MBTAClient
 from .models import (
+    ROUTE_TYPE_LIGHT_RAIL,
     Disambiguation,
     DisambiguationKind,
     DisambiguationOption,
@@ -42,6 +43,13 @@ STOP_CANDIDATE_FLOOR = 60.0  # plausible enough to offer as a disambiguation opt
 MAX_STOP_CANDIDATES = 3
 
 DIRECTION_CUTOFF = 80.0
+
+# The Green Line is a family of branch routes (Green-B/C/D/E) sharing this id prefix.
+# A generic "Green Line" token is resolved across all branches, with the named stop
+# selecting the branch(es); `_GREEN_CARRY` is the token re-used when we must re-ask.
+_GREEN_BRANCH_PREFIX = "Green-"
+_GREEN_LINE_TOKENS = frozenset({"green", "green line", "the green line", "greenline"})
+_GREEN_CARRY = "green line"
 
 # Generic street-type words and connectors. Stripped from a location before
 # checking which stops actually contain its *distinctive* words, so "Eutaw St"
@@ -96,6 +104,30 @@ def _first_index(ordered_ids: list[str], ids: tuple[str, ...]) -> int | None:
         if sid in wanted:
             return i
     return None
+
+
+def _is_green_line_token(token: str) -> bool:
+    """True for a generic 'Green Line' token (not a specific branch like 'Green Line E')."""
+    return normalize(token) in _GREEN_LINE_TOKENS
+
+
+def _green_target(
+    branch_ids: list[str],
+    stop_ids: tuple[str, ...],
+    stop_name: str,
+    direction_id: int,
+    dest: str,
+) -> ResolvedTarget:
+    """A Green Line target spanning one or more branch routes (comma-joined route_id)."""
+    return ResolvedTarget(
+        route_id=",".join(branch_ids),
+        route_name="Green Line",
+        stop_ids=stop_ids,
+        stop_name=stop_name,
+        direction_id=direction_id,
+        direction_destination=dest,
+        route_type=ROUTE_TYPE_LIGHT_RAIL,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +193,9 @@ class Resolver:
         # Step 1 — route.
         if not route_token or not route_token.strip():
             return Disambiguation(kind=DisambiguationKind.ROUTE)
+        # The Green Line spans four branch routes; let the named stop pick the branch.
+        if _is_green_line_token(route_token):
+            return await self._resolve_green(location, direction_hint)
         route = await self._routes.lookup(route_token)
         if route is None:
             return Disambiguation(kind=DisambiguationKind.ROUTE, query=route_token)
@@ -199,6 +234,13 @@ class Resolver:
         Used by disambiguation follow-ups: the stop is already a concrete set of
         ids (no more fuzzy matching), so only direction remains.
         """
+        # A Green Line target carries branch route_id(s) like "Green-E" or
+        # "Green-B,Green-C"; finish it across those branches (may re-narrow on the
+        # chosen destination), never as a single ordinary route.
+        if route_id.startswith(_GREEN_BRANCH_PREFIX):
+            return await self._green_direction(
+                route_id.split(","), stop_ids, stop_name, direction_hint
+            )
         route = await self._routes.get(route_id)
         if route is None:  # route cache changed under us — ask again
             return Disambiguation(kind=DisambiguationKind.ROUTE)
@@ -206,6 +248,98 @@ class Resolver:
         # label) — match it directly; no destination-stop inference needed here.
         direction_id = _resolve_direction(route, direction_hint)
         return _complete(route, stop_ids, stop_name, direction_id)
+
+    async def _resolve_green(
+        self, location: str | None, direction_hint: str | None
+    ) -> ResolvedTarget | Disambiguation:
+        """Resolve a generic 'Green Line' query by letting the named stop pick the branch.
+
+        The Green Line is four branch routes (Green-B/C/D/E). We match the stop across
+        all of them: a branch-only stop (Northeastern -> E) resolves to that branch; a
+        trunk stop (Park Street) keeps every serving branch so predictions cover them all,
+        and the chosen destination later narrows back to the right branch(es).
+        """
+        branches = [
+            r for r in await self._routes.all_routes() if r.id.startswith(_GREEN_BRANCH_PREFIX)
+        ]
+        if not branches:
+            return Disambiguation(kind=DisambiguationKind.ROUTE, query="Green Line")
+        if not location or not location.strip():
+            return Disambiguation(kind=DisambiguationKind.STOP, route_id=_GREEN_CARRY)
+
+        all_stops: list[Stop] = []
+        serving: dict[str, set[str]] = {}
+        for branch in branches:
+            stops = await self._fetch_stops(branch.id)
+            all_stops.extend(stops)
+            for stop in stops:
+                key = normalize(stop.name)
+                if key:
+                    serving.setdefault(key, set()).add(branch.id)
+
+        outcome = _match_stop(location, _group_by_name(all_stops))
+        if outcome.winner is None:
+            options = tuple(
+                DisambiguationOption(
+                    label=g.name,
+                    stop_ids=g.ids,
+                    route_id=",".join(sorted(serving.get(normalize(g.name), set()))),
+                )
+                for g in outcome.candidates
+            )
+            return Disambiguation(
+                kind=DisambiguationKind.STOP, options=options, route_id=_GREEN_CARRY, query=location
+            )
+
+        branch_ids = sorted(serving.get(normalize(outcome.winner.name), set()))
+        return await self._green_direction(
+            branch_ids, outcome.winner.ids, outcome.winner.name, direction_hint
+        )
+
+    async def _green_direction(
+        self,
+        branch_ids: list[str],
+        stop_ids: tuple[str, ...],
+        stop_name: str,
+        direction_hint: str | None,
+    ) -> ResolvedTarget | Disambiguation:
+        """Pick the Green Line direction across the serving branches, or ask which."""
+        branches: list[Route] = []
+        for bid in branch_ids:
+            branch = await self._routes.get(bid)
+            if branch is not None:
+                branches.append(branch)
+        if not branches:
+            return Disambiguation(kind=DisambiguationKind.ROUTE, query="Green Line")
+
+        # A destination/direction hint: keep only the branches that actually go there.
+        if direction_hint and direction_hint.strip():
+            matched = []  # (branch_id, direction_id, destination)
+            for branch in branches:
+                d = _resolve_direction(branch, direction_hint)
+                if d is not None:
+                    matched.append((branch.id, d, branch.direction_destinations[d]))
+            if matched:
+                direction_id = matched[0][1]
+                dest = matched[0][2]
+                narrowed = sorted({bid for bid, d, x in matched if d == direction_id and x == dest})
+                return _green_target(narrowed, stop_ids, stop_name, direction_id, dest)
+
+        # No usable hint: offer the distinct destinations across the serving branches.
+        options: list[DisambiguationOption] = []
+        seen: set[tuple[str, int]] = set()
+        for branch in branches:
+            for i, dest in enumerate(branch.direction_destinations):
+                if (dest, i) not in seen:
+                    seen.add((dest, i))
+                    options.append(DisambiguationOption(label=dest, direction_id=i))
+        return Disambiguation(
+            kind=DisambiguationKind.DIRECTION,
+            options=tuple(options),
+            route_id=",".join(sorted(b.id for b in branches)),
+            stop_ids=stop_ids,
+            stop_name=stop_name,
+        )
 
     async def _fetch_stops(self, route_id: str) -> list[Stop]:
         data = await self._client.get_json(
@@ -345,6 +479,11 @@ def _match_stop(location: str, groups: list[_StopGroup]) -> _StopOutcome:
     significant = _significant_tokens(norm)
     if significant:
         contained = [g for _, g in scored if _contains_all(g.name, significant)]
+        # An exact name match wins outright over rivals that merely share a token
+        # ("Park Street" beats "Mission Park", which only shares "park").
+        exact = [g for g in contained if normalize(g.name) == norm]
+        if len(exact) == 1:
+            return _StopOutcome(winner=exact[0], candidates=())
         if len(contained) == 1:
             return _StopOutcome(winner=contained[0], candidates=())
         if len(contained) >= 2:

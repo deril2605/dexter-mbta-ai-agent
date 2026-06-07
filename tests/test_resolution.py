@@ -149,6 +149,26 @@ async def test_distinctive_word_wins_over_fuzzy_noise(mock_routes):
     assert result.stop_name == "Meridian St @ Eutaw St"
 
 
+async def test_exact_stop_name_beats_token_sharing_rival(mock_routes):
+    # "Park Street" must win outright over "Mission Park" (they only share "park").
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(
+            200,
+            json=stops_payload(
+                ("1", "Park Street"),
+                ("2", "Mission Park"),
+                ("70", "Maverick Station"),
+            ),
+        )
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("116", "Park Street", "Maverick")
+
+    assert isinstance(result, ResolvedTarget)
+    assert result.stop_name == "Park Street"
+    assert result.stop_ids == ("1",)
+
+
 async def test_unknown_stop_yields_stop_clarification(mock_routes):
     mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(
         return_value=httpx.Response(
@@ -277,6 +297,95 @@ async def test_same_origin_and_destination_falls_back(mock_routes):
 
     assert isinstance(result, Disambiguation)
     assert result.kind is DisambiguationKind.DIRECTION
+
+
+# --- Green Line: a generic line token, stop picks the branch ----------------
+
+_GREEN_BRANCH_STOPS = {
+    "Green-B": (("place-pktrm", "Park Street"), ("place-gover", "Government Center"),
+                ("place-lake", "Boston College")),
+    "Green-C": (("place-pktrm", "Park Street"), ("place-gover", "Government Center"),
+                ("place-clmnl", "Cleveland Circle")),
+    "Green-D": (("place-pktrm", "Park Street"), ("place-unsqu", "Union Square"),
+                ("place-river", "Riverside")),
+    "Green-E": (("place-pktrm", "Park Street"), ("place-nuniv", "Northeastern University"),
+                ("place-mispk", "Mission Park"), ("place-hsmnl", "Heath Street")),
+}  # fmt: skip
+
+
+def _green_stops_handler(request: httpx.Request) -> httpx.Response:
+    route = request.url.params.get("filter[route]")
+    return httpx.Response(200, json=stops_payload(*_GREEN_BRANCH_STOPS.get(route, ())))
+
+
+async def test_green_line_branch_stop_selects_correct_branch(mock_routes):
+    # The reported bug: "green line from Northeastern" must resolve to the E branch
+    # (Heath St / Medford-Tufts), never Green-B (Boston College).
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(side_effect=_green_stops_handler)
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve(
+            "green line", "Northeastern University", "Heath Street"
+        )
+
+    assert isinstance(result, ResolvedTarget)
+    assert result.route_id == "Green-E"
+    assert result.route_name == "Green Line"
+    assert result.direction_destination == "Heath Street"
+    assert result.direction_id == 0
+
+
+async def test_green_line_branch_stop_asks_only_that_branch_directions(mock_routes):
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(side_effect=_green_stops_handler)
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("green line", "Northeastern University", None)
+
+    assert isinstance(result, Disambiguation)
+    assert result.kind is DisambiguationKind.DIRECTION
+    labels = {o.label for o in result.options}
+    assert labels == {"Heath Street", "Medford/Tufts"}  # E branch only
+    assert "Boston College" not in labels  # the old wrong answer
+    assert result.route_id == "Green-E"
+
+
+async def test_green_line_trunk_stop_with_destination_narrows_branches(mock_routes):
+    # Park Street is on every branch; "toward Government Center" keeps only B and C.
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(side_effect=_green_stops_handler)
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve(
+            "green line", "Park Street", "Government Center"
+        )
+
+    assert isinstance(result, ResolvedTarget)
+    assert result.route_id == "Green-B,Green-C"
+    assert result.direction_destination == "Government Center"
+    assert result.direction_id == 1
+
+
+async def test_green_line_trunk_stop_offers_all_destinations(mock_routes):
+    mock_routes.get(f"{MBTA_BASE_URL}/stops").mock(side_effect=_green_stops_handler)
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve("green line", "Park Street", None)
+
+    assert isinstance(result, Disambiguation)
+    assert result.kind is DisambiguationKind.DIRECTION
+    assert result.route_id == "Green-B,Green-C,Green-D,Green-E"
+    labels = {o.label for o in result.options}
+    assert {"Boston College", "Heath Street", "Riverside"} <= labels
+
+
+async def test_green_line_direction_answer_narrows_to_one_branch(mock_routes):
+    # The clarify path: answering "Heath Street" at a trunk stop narrows to Green-E.
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        result = await make_resolver(client).resolve_with_ids(
+            route_id="Green-B,Green-C,Green-D,Green-E",
+            stop_ids=("place-pktrm",),
+            stop_name="Park Street",
+            direction_hint="Heath Street",
+        )
+
+    assert isinstance(result, ResolvedTarget)
+    assert result.route_id == "Green-E"
+    assert result.direction_destination == "Heath Street"
 
 
 # --- Route clarification ----------------------------------------------------

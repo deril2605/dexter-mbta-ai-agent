@@ -39,6 +39,7 @@ async def router_node(state: AgentState, *, router: Router) -> dict:
         "location": slots.location,
         "direction_hint": slots.direction_hint,
         "follow_up": slots.follow_up,
+        "offset": slots.offset,
         "result": None,
         "reply": "",
         "needs_input": False,
@@ -54,7 +55,8 @@ async def predictions_node(
     now: datetime | None = None,
 ) -> dict:
     """Resolve the slots and fetch departures (with schedule fallback)."""
-    # Pure follow-up ("and the one after?") with nothing new -> reuse last target.
+    # Pure follow-up ("and the one after?") with nothing new -> reuse last target,
+    # advancing the departure window by the requested offset (paging forward).
     if (
         state.get("follow_up")
         and state.get("last_target") is not None
@@ -62,14 +64,16 @@ async def predictions_node(
         and not state.get("location")
         and not state.get("direction_hint")
     ):
-        return await _fetch_for_target(state["last_target"], departures, now)
+        cumulative = (state.get("last_offset") or 0) + (state.get("offset") or 0)
+        return await _fetch_for_target(state["last_target"], departures, now, cumulative)
 
     slots = {
         "route": state.get("route"),
         "location": state.get("location"),
         "direction_hint": state.get("direction_hint"),
     }
-    return await _resolve_and_fetch(slots, resolver, departures, now)
+    # A fresh query starts at the soonest departure (offset is usually 0 here).
+    return await _resolve_and_fetch(slots, resolver, departures, now, state.get("offset") or 0)
 
 
 async def clarify_node(
@@ -141,7 +145,9 @@ async def clarify_node(
             if option is None:  # answer didn't match any offered stop — ask again
                 return {"result": pending, "pending": pending, "needs_input": True}
             resolved = await resolver.resolve_with_ids(
-                route_id=pending.route_id,
+                # A Green Line option carries its own serving-branch set; fall back to
+                # the question's route for ordinary single-route stops.
+                route_id=option.route_id or pending.route_id,
                 stop_ids=option.stop_ids,
                 stop_name=option.label,
                 direction_hint=base.get("direction_hint"),
@@ -300,7 +306,11 @@ async def _resolve_facilities(
 
 
 async def _resolve_and_fetch(
-    slots: dict, resolver: Resolver, departures: DeparturesService, now: datetime | None
+    slots: dict,
+    resolver: Resolver,
+    departures: DeparturesService,
+    now: datetime | None,
+    offset: int = 0,
 ) -> dict:
     try:
         resolved = await resolver.resolve(
@@ -314,7 +324,7 @@ async def _resolve_and_fetch(
                 "pending_intent": "predictions",
                 "needs_input": True,
             }
-        result = await departures.get_departures(resolved, now=now)
+        result = await departures.get_departures(resolved, now=now, offset=offset)
     except MBTARateLimitError:
         return {"result": ServiceError(kind="busy"), "needs_input": False}
     except (MBTAUnavailableError, MBTAError):
@@ -323,6 +333,7 @@ async def _resolve_and_fetch(
     return {
         "result": result,
         "last_target": resolved,
+        "last_offset": offset,
         "pending": None,
         "pending_slots": None,
         "pending_intent": None,
@@ -346,6 +357,7 @@ async def _finish(
     return {
         "result": result,
         "last_target": resolved,
+        "last_offset": 0,
         "pending": None,
         "pending_slots": None,
         "pending_intent": None,
@@ -353,11 +365,13 @@ async def _finish(
     }
 
 
-async def _fetch_for_target(target, departures: DeparturesService, now: datetime | None) -> dict:
+async def _fetch_for_target(
+    target, departures: DeparturesService, now: datetime | None, offset: int = 0
+) -> dict:
     try:
-        result = await departures.get_departures(target, now=now)
+        result = await departures.get_departures(target, now=now, offset=offset)
     except MBTARateLimitError:
         return {"result": ServiceError(kind="busy"), "needs_input": False}
     except (MBTAUnavailableError, MBTAError):
         return {"result": ServiceError(kind="unavailable"), "needs_input": False}
-    return {"result": result, "last_target": target, "needs_input": False}
+    return {"result": result, "last_target": target, "last_offset": offset, "needs_input": False}

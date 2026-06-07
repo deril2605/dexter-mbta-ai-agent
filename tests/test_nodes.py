@@ -104,6 +104,33 @@ async def test_predictions_node_resolves_and_returns_predictions(deps):
     await deps.client.aclose()
 
 
+async def test_predictions_node_follow_up_offset_pages_forward(deps):
+    deps.respx.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=predictions_payload(4, 12, 19, 27))
+    )
+    state = {"follow_up": True, "last_target": TARGET, "last_offset": 0, "offset": 1}
+    update = await predictions_node(
+        state, resolver=deps.resolver, departures=deps.departures, now=NOW
+    )
+    assert update["result"].minutes_away == (12, 19, 27)
+    assert update["last_offset"] == 1
+    await deps.client.aclose()
+
+
+async def test_predictions_node_offset_accumulates_across_turns(deps):
+    deps.respx.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=predictions_payload(4, 12, 19, 27))
+    )
+    # Already paged once (last_offset=1); another "one after that" (offset=1) -> 2.
+    state = {"follow_up": True, "last_target": TARGET, "last_offset": 1, "offset": 1}
+    update = await predictions_node(
+        state, resolver=deps.resolver, departures=deps.departures, now=NOW
+    )
+    assert update["result"].minutes_away == (19, 27)
+    assert update["last_offset"] == 2
+    await deps.client.aclose()
+
+
 async def test_predictions_node_missing_direction_sets_pending(deps):
     deps.respx.get(f"{MBTA_BASE_URL}/stops").mock(
         return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))

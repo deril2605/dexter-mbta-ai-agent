@@ -137,9 +137,16 @@ def test_alerts_reads_header_and_summarizes_rest():
     assert "1 more alert" in text  # the third is summarized, not read out
 
 
-def test_alerts_empty_is_reassuring():
+def test_alerts_empty_says_running_normally():
     text = format_outcome(AlertsResult(scope_label="Red Line", alerts=()))
-    assert "no current service alerts for the Red Line" in text
+    assert "Red Line is running normally" in text
+    assert "no current service alerts" in text
+
+
+def test_predictions_empty_window_reads_as_last():
+    # An empty PredictionResult only happens when paging past the last departure.
+    text = format_outcome(PredictionResult(target=target(), minutes_away=()))
+    assert text == "That's the last 116 toward Maverick I can see right now."
 
 
 def test_alerts_without_header_falls_back_to_effect():

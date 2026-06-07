@@ -59,6 +59,27 @@ ROUTES_PAYLOAD = {
                 "direction_destinations": ["Bowdoin", "Wonderland"],
             },
         },
+        # The Green Line is four branch routes — a generic "Green Line" token must be
+        # resolved across all of them, with the named stop selecting the branch.
+        *(
+            {
+                "type": "route",
+                "id": f"Green-{letter}",
+                "attributes": {
+                    "short_name": letter,
+                    "long_name": f"Green Line {letter}",
+                    "type": 0,
+                    "direction_names": ["West", "East"],
+                    "direction_destinations": list(dests),
+                },
+            }
+            for letter, dests in (
+                ("B", ("Boston College", "Government Center")),
+                ("C", ("Cleveland Circle", "Government Center")),
+                ("D", ("Riverside", "Union Square")),
+                ("E", ("Heath Street", "Medford/Tufts")),
+            )
+        ),
     ]
 }
 

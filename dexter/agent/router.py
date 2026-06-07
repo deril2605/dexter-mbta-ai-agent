@@ -36,7 +36,9 @@ slots (leave a slot out when it isn't present):
 - direction_hint: a destination or direction mentioned ("Maverick", "inbound", "toward Harvard").
 - follow_up: true when the message refers back to a previous turn — a continuation \
 ("and the one after?", "what about inbound?") or a short answer to a clarifying question \
-("the 116", "toward Maverick", "Maverick Station")."""
+("the 116", "toward Maverick", "Maverick Station").
+- offset: for a follow-up asking for LATER departures, how many to advance past the next one — \
+1 for "and the one after that?", 2 for "two after that"; 0 (or omit) otherwise."""
 
 _TOOL = {
     "type": "function",
@@ -51,6 +53,11 @@ _TOOL = {
                 "location": {"type": "string", "description": "Stop or place name."},
                 "direction_hint": {"type": "string", "description": "Destination or direction."},
                 "follow_up": {"type": "boolean"},
+                "offset": {
+                    "type": "integer",
+                    "description": "Advance for a 'later departures' follow-up: "
+                    "1 for 'the one after that', else 0.",
+                },
             },
             "required": ["intent"],
         },
@@ -65,6 +72,7 @@ class RouterSlots:
     location: str | None = None
     direction_hint: str | None = None
     follow_up: bool = False
+    offset: int = 0
 
 
 class Router:
@@ -122,6 +130,7 @@ def _parse_response(response) -> RouterSlots:
         location=_clean(args.get("location")),
         direction_hint=_clean(args.get("direction_hint")),
         follow_up=bool(args.get("follow_up", False)),
+        offset=_parse_offset(args.get("offset")),
     )
 
 
@@ -130,3 +139,11 @@ def _clean(value) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _parse_offset(value) -> int:
+    """A non-negative advance for 'later departures' follow-ups; 0 on anything odd."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0

@@ -171,6 +171,38 @@ skill, so disruptions always lead and a line with only a feed-notice reads as cl
 **Lesson:** unit tests prove the wiring; **driving the real app surfaces relevance/UX problems
 the mocks can't** — sort ties and "technically-correct-but-noisy" data only show up live.
 
+### 16. Closed the follow-up gap, and added a router eval to measure accuracy
+**Follow-up offset:** "and the one after that?" now returns *later* departures (PRD §10
+scenario 2, previously a documented gap). Added an `offset` slot to the router and a cumulative
+`last_offset` in state; `DeparturesService` pages the departure window forward (offset past the
+end reads as "that's the last one").
+**"Is it running?":** an alerts query with no disruptions now leads "The {line} is running
+normally." instead of the flat "no alerts" line.
+**Router eval harness:** a `pytest -m eval` suite scores the *real* router on ~30 labeled
+utterances (intent exact-match, slots lenient), deselected by default so the normal loop stays
+fast/offline; skips cleanly without Azure creds. First run: **100% intent, 100% slots** on
+gpt-4.1-mini.
+**Lesson:** a model swap is only safe to *keep* once you can measure accuracy, not just latency
+— the eval is the accuracy counterpart to the Phoenix latency win, and it now covers the exact
+phrasings we hand-tested (two-stop direction, "the one after that", "is it running").
+
+### 17. The Green Line is a line, not a route — the stop picks the branch
+**Bug (live):** "green line from Northeastern" asked "toward Boston College or Government
+Center?" — wrong branch entirely. Cause: the Green Line is four routes (Green-B/C/D/E);
+`lookup("green line")` fuzzy-collapsed to one arbitrary branch (Green-B), so a stop on another
+branch (Northeastern is E-only) couldn't be found and mis-matched.
+**Fix:** a generic "green line" token now resolves across all branches — match the stop over the
+union, and the serving branch(es) decide. A branch-only stop (Northeastern → Green-E) resolves
+cleanly; a **trunk** stop (Park Street, on all four) keeps every branch in the `route_id`
+(comma-joined, which `/predictions filter[route]` accepts) and the chosen destination later
+narrows back ("toward Government Center" → Green-B,Green-C). All in the LLM-free library; the
+clarify path needed only a one-line tweak (a stop option carries its own branch set).
+**Also surfaced + fixed:** `_match_stop` now lets an **exact** stop-name match win over a rival
+that only shares a token ("Park Street" vs "Mission Park").
+**Lesson:** model the domain's real shape. Blue/Orange/Red(ish) are single routes so they
+"just worked"; the Green Line's branch structure is the actual data model, and resolution has
+to mirror it. Driving the live app (not mocks) is what exposed it.
+
 ---
 
 ## TL;DR — lessons worth carrying forward

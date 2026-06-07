@@ -24,7 +24,6 @@ from dexter.mbta.models import (
 
 from .state import AgentState, ServiceError, SkillUnavailable
 
-_VEHICLE_SINGULAR = {0: "train", 1: "train", 2: "train", 3: "bus", 4: "ferry"}
 _VEHICLE_PLURAL = {0: "trains", 1: "trains", 2: "trains", 3: "buses", 4: "ferries"}
 
 
@@ -65,8 +64,8 @@ def _format_predictions(result: PredictionResult) -> str:
     minutes = result.minutes_away
     descriptor = _target_descriptor(result.target)
     if not minutes:
-        vehicle = _VEHICLE_SINGULAR.get(result.target.route_type, "trip")
-        return f"I don't have an upcoming {vehicle} for the {descriptor} right now."
+        # Only reached by paging past the last departure ("the one after that").
+        return f"That's the last {descriptor} I can see right now."
 
     sentence = f"The next {descriptor} is {_relative_lead(minutes[0])}"
     rest = minutes[1:]
@@ -142,7 +141,7 @@ _MAX_SPOKEN_ALERTS = 2
 def _format_alerts(result: AlertsResult) -> str:
     scope = _speakable(result.scope_label)
     if not result.alerts:
-        return f"There are no current service alerts for the {scope}."
+        return f"The {scope} is running normally — no current service alerts."
 
     spoken = [_alert_sentence(a) for a in result.alerts[:_MAX_SPOKEN_ALERTS]]
     text = " ".join(spoken)
