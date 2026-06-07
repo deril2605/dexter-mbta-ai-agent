@@ -13,11 +13,31 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger("dexter.service")
+
+# Static terminal UI lives in web/ (sibling to dexter/), kept fully separate from
+# the app layers and served only when dexter_serve_web is on. Resolve it against
+# the working directory first (the container copies web/ next to the run dir, and
+# local runs start from the repo root) and fall back to the source-relative path
+# (covers editable installs and tests). First existing file wins.
+def _find_web_index() -> Path:
+    candidates = (
+        Path.cwd() / "web" / "index.html",
+        Path(__file__).resolve().parents[2] / "web" / "index.html",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    return candidates[0]  # nonexistent; the route returns 404
+
+
+_WEB_INDEX = _find_web_index()
 
 
 class ChatRequest(BaseModel):
@@ -68,6 +88,11 @@ async def _build_runtime(app: FastAPI) -> None:
     app.state.mbta_client = mbta
     app.state.azure_client = azure
     app.state.owns_clients = True
+    # Beta web client + gate, sourced from config here (lifespan) so importing this
+    # module never forces Settings validation. Tests inject a graph and skip this,
+    # leaving the defaults set in create_app (gate off, web off).
+    app.state.passcode = settings.dexter_passcode
+    app.state.serve_web = settings.dexter_serve_web
 
 
 @asynccontextmanager
@@ -86,14 +111,32 @@ def create_app(*, graph=None) -> FastAPI:
     app = FastAPI(title="Dexter", version="0.1.0", lifespan=lifespan)
     app.state.graph = graph
     app.state.owns_clients = False
+    # Safe defaults; _build_runtime overrides these from config when the service
+    # owns its dependencies. Tests that inject a graph keep the gate/web off.
+    app.state.passcode = None
+    app.state.serve_web = False
 
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok"}
 
+    @app.get("/")
+    async def index() -> FileResponse:
+        # Dumb static client (the CLI's twin); only present when explicitly enabled.
+        if not app.state.serve_web or not _WEB_INDEX.is_file():
+            raise HTTPException(status_code=404)
+        return FileResponse(_WEB_INDEX)
+
     @app.post("/chat", response_model=ChatResponse)
-    async def chat(request: ChatRequest) -> ChatResponse:
+    async def chat(
+        request: ChatRequest,
+        x_dexter_passcode: str | None = Header(default=None),
+    ) -> ChatResponse:
         from dexter.observability import session
+
+        # Gate before any graph/LLM work so a leaked link can't spend Azure quota.
+        if app.state.passcode and x_dexter_passcode != app.state.passcode:
+            raise HTTPException(status_code=401, detail="Invalid or missing passcode.")
 
         config = {"configurable": {"thread_id": request.session_id}}
         try:

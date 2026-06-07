@@ -41,6 +41,11 @@ def configure_tracing(settings) -> bool:
     endpoint = getattr(settings, "dexter_tracing_endpoint", None)
     if endpoint:
         kwargs["endpoint"] = endpoint
+    # Phoenix Cloud authenticates the OTLP exporter via an `api_key` header.
+    # Absent (local Phoenix) this stays unset, preserving prior behavior.
+    api_key = getattr(settings, "dexter_tracing_api_key", None)
+    if api_key:
+        kwargs["headers"] = {"api_key": api_key}
     register(**kwargs)
 
     _configured = True

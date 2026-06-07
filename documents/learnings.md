@@ -275,6 +275,40 @@ Three compounding causes and fixes (the matcher is `rapidfuzz`, not regex; the i
 
 ---
 
+## Phase 1.5 — Beta web client + Azure Container Apps deployment (2026-06-07)
+
+Goal: let a friend beta-test over a shareable link — no repo clone, no scripts — while
+keeping the option to tear it all out trivially.
+
+- **The web UI is the CLI's twin, not a new layer.** Because `cli/repl.py` was already a
+  dumb client that only POSTs `/chat`, a browser client adds *zero* code to brain/agent/mbta.
+  A single static `web/index.html` (terminal-styled, client-side typewriter, no framework,
+  no `xterm.js`) talks to the same endpoint. Honors "no logic in the client" for free.
+- **Decoupling = folders + a default-off flag, not a separate repo.** Pushed back on a
+  second repository: it buys no isolation but adds `/chat` contract drift and two pipelines.
+  Instead `web/` and `deploy/` are sibling folders; `dexter/` imports neither. Removal is
+  `rm -rf web/ deploy/` + `DEXTER_SERVE_WEB=false` → exactly Phase 1 again.
+- **Gate before the LLM.** The passcode check (`X-Dexter-Passcode`) sits at the top of
+  `/chat`, before any graph/Azure call, so a leaked link can't burn quota. The gate only
+  *appears* in the UI on a real 401 — ungated/local runs never prompt.
+- **Lazy-config discipline held.** Web/gate state lives on `app.state`, defaulted in
+  `create_app` and set from `Settings` only in `_build_runtime` (lifespan). Importing the
+  module still triggers no validation, so the 150-test suite stays offline and green.
+- **Tracing is server-side — the friend's browser emits nothing.** Spans come from the
+  brain, so remote testers' sessions land wherever the brain points. Local Phoenix is
+  in-memory/ephemeral and unreachable from a cloud brain, so beta history goes to **Phoenix
+  Cloud** via OTLP + an `api_key` header. Split the `tracing` extra into a slim client
+  (`arize-phoenix-otel` only, shipped in the image) vs `tracing-local` (full server).
+- **Container gotcha:** `pip install .` relocates `dexter/` into site-packages, so a
+  source-relative path to `web/` breaks in the image. Resolve the static file CWD-first,
+  source-relative as fallback — works for the container (WORKDIR `/app`), editable installs,
+  and tests alike.
+- **ACA setting that matters:** `--min-replicas 1`. Scale-to-zero would put a cold start +
+  route-cache re-warm in front of the already-slow router LLM on the first message. Budget's
+  not the constraint; a warm replica is.
+
+---
+
 ## TL;DR — lessons worth carrying forward
 
 - **Measure before optimizing.** Tracing turned a "latency vibe" into "the LLM is 98% of
