@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-INTENTS = ("predictions", "alerts", "facilities", "smalltalk", "unknown")
+INTENTS = ("predictions", "alerts", "service_status", "facilities", "smalltalk", "unknown")
 TOOL_NAME = "extract_transit_query"
 
 SYSTEM_PROMPT = """You are the intent router for Dexter, an MBTA (Boston) transit assistant.
@@ -34,7 +34,13 @@ Maverick" means route "116", direction_hint "Maverick", and no location.
 intent:
 - "predictions": when the next bus/train arrives or departs \
 (e.g. "when's the next 116 from Bennington Street toward Maverick").
-- "alerts": service alerts, delays, disruptions ("is the Blue Line down?").
+- "alerts": service alerts, delays, or disruptions for ONE named route or line \
+("is the Blue Line down?", "any delays on the 66?").
+- "service_status": the health of the whole system, when NO specific route is named \
+now OR carried from the conversation ("how's the T right now?", "any delays anywhere?", \
+"is everything running ok?", "what's down right now?"). If a route is named now or still in \
+play from an earlier turn, use "alerts" instead — e.g. after "any alerts on the Red Line?", \
+a bare "is it running?" is "alerts" with route "Red Line", not "service_status".
 - "facilities": elevators or escalators ("is the elevator at Park St working?").
 - "smalltalk": social conversation, not a request for transit info — greetings ("hi"), \
 thanks ("thank you"), acknowledgements or sign-offs ("no that's enough", "that's all", \

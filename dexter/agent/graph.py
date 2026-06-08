@@ -31,6 +31,7 @@ from .nodes import (
     fallback_node,
     predictions_node,
     router_node,
+    service_status_node,
     smalltalk_node,
 )
 from .router import Router
@@ -39,6 +40,7 @@ from .state import AgentState
 _INTENT_TO_NODE = {
     "predictions": "predictions",
     "alerts": "alerts",
+    "service_status": "service_status",
     "facilities": "facilities",
     "smalltalk": "smalltalk",
 }
@@ -99,7 +101,9 @@ def build_graph(
     builder.add_node("router", functools.partial(router_node, router=router))
     builder.add_node(
         "predictions",
-        functools.partial(predictions_node, resolver=resolver, departures=departures),
+        functools.partial(
+            predictions_node, resolver=resolver, departures=departures, alerts=alerts
+        ),
     )
     builder.add_node(
         "clarify",
@@ -122,6 +126,7 @@ def build_graph(
             facilities_node, resolver=resolver, stations=stations, facilities=facilities
         ),
     )
+    builder.add_node("service_status", functools.partial(service_status_node, alerts=alerts))
     builder.add_node("smalltalk", functools.partial(smalltalk_node, router=router))
     builder.add_node("fallback", fallback_node)
     builder.add_node("format", format_node)
@@ -134,12 +139,21 @@ def build_graph(
             "clarify": "clarify",
             "predictions": "predictions",
             "alerts": "alerts",
+            "service_status": "service_status",
             "facilities": "facilities",
             "smalltalk": "smalltalk",
             "fallback": "fallback",
         },
     )
-    for node in ("predictions", "clarify", "alerts", "facilities", "smalltalk", "fallback"):
+    for node in (
+        "predictions",
+        "clarify",
+        "alerts",
+        "service_status",
+        "facilities",
+        "smalltalk",
+        "fallback",
+    ):
         builder.add_edge(node, "format")
     builder.add_edge("format", END)
 

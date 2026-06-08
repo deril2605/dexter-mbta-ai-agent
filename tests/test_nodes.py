@@ -18,6 +18,7 @@ from dexter.agent.nodes import (
     facilities_node,
     fallback_node,
     predictions_node,
+    service_status_node,
     smalltalk_node,
 )
 from dexter.agent.state import Fallback, ServiceError, SmallTalk
@@ -32,6 +33,7 @@ from dexter.mbta.models import (
     FacilitiesResult,
     NoServiceResult,
     PredictionResult,
+    SystemStatusResult,
 )
 from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver
@@ -176,6 +178,104 @@ async def test_predictions_node_follow_up_reuses_last_target(deps):
     assert isinstance(update["result"], PredictionResult)
     assert update["result"].target is TARGET
     assert update["result"].minutes_away == (6, 14)
+    await deps.client.aclose()
+
+
+# --- service-aware predictions (alert weaving) ------------------------------
+
+
+async def test_predictions_node_attaches_active_alert(deps):
+    deps.respx.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    deps.respx.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=predictions_payload(4, 12))
+    )
+    deps.respx.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "type": "alert",
+                        "id": "1",
+                        "attributes": {"effect": "DELAY", "severity": 5, "header": "Delays."},
+                    }
+                ]
+            },
+        )
+    )
+    state = {"route": "116", "location": "Maverick", "direction_hint": "Wonderland"}
+    update = await predictions_node(
+        state,
+        resolver=deps.resolver,
+        departures=deps.departures,
+        alerts=AlertsService(deps.client),
+        now=NOW,
+    )
+    assert isinstance(update["result"], PredictionResult)
+    assert update["result"].minutes_away == (4, 12)
+    assert update["result"].alert is not None
+    assert update["result"].alert.effect == "DELAY"
+    await deps.client.aclose()
+
+
+async def test_predictions_node_alert_failure_does_not_break_answer(deps):
+    # A failing /alerts heads-up must never sink the departures answer.
+    deps.respx.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    deps.respx.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=predictions_payload(4, 12))
+    )
+    deps.respx.get(f"{MBTA_BASE_URL}/alerts").mock(return_value=httpx.Response(503))
+    state = {"route": "116", "location": "Maverick", "direction_hint": "Wonderland"}
+    update = await predictions_node(
+        state,
+        resolver=deps.resolver,
+        departures=deps.departures,
+        alerts=AlertsService(deps.client),
+        now=NOW,
+    )
+    assert isinstance(update["result"], PredictionResult)
+    assert update["result"].alert is None
+    await deps.client.aclose()
+
+
+# --- service_status_node ----------------------------------------------------
+
+
+async def test_service_status_node_groups_lines(deps):
+    deps.respx.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "type": "alert",
+                        "id": "1",
+                        "attributes": {
+                            "effect": "DELAY",
+                            "severity": 5,
+                            "header": "Red delays.",
+                            "informed_entity": [{"route": "Red"}],
+                        },
+                    }
+                ]
+            },
+        )
+    )
+    update = await service_status_node({}, alerts=AlertsService(deps.client), now=NOW)
+    assert isinstance(update["result"], SystemStatusResult)
+    assert [ls.label for ls in update["result"].affected] == ["Red Line"]
+    assert update["needs_input"] is False
+    await deps.client.aclose()
+
+
+async def test_service_status_node_maps_error_to_service_error(deps):
+    deps.respx.get(f"{MBTA_BASE_URL}/alerts").mock(return_value=httpx.Response(503))
+    update = await service_status_node({}, alerts=AlertsService(deps.client), now=NOW)
+    assert update["result"] == ServiceError(kind="unavailable")
     await deps.client.aclose()
 
 

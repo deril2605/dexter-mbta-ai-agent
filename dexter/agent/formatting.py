@@ -21,6 +21,7 @@ from dexter.mbta.models import (
     ResolvedTarget,
     ScheduleResult,
     StopNotOnRoute,
+    SystemStatusResult,
 )
 
 from .state import AgentState, ServiceError, SkillUnavailable, SmallTalk
@@ -61,6 +62,8 @@ def format_outcome(outcome) -> str:
             return _format_stop_not_on_route(outcome)
         case AlertsResult():
             return _format_alerts(outcome)
+        case SystemStatusResult():
+            return _format_system_status(outcome)
         case FacilitiesResult():
             return _format_facilities(outcome)
         case Disambiguation():
@@ -89,7 +92,7 @@ def _format_predictions(result: PredictionResult) -> str:
     rest = minutes[1:]
     if rest:
         sentence += f", then {_join_minutes(rest)}"
-    return sentence + "."
+    return _with_heads_up(sentence + ".", result.alert)
 
 
 def _relative_lead(minutes: int) -> str:
@@ -116,17 +119,19 @@ def _join_minutes(values: tuple[int, ...]) -> str:
 
 def _format_schedule(result: ScheduleResult) -> str:
     descriptor = _target_descriptor(result.target)
-    return (
+    sentence = (
         "Real-time data isn't available, but per the schedule the next "
         f"{descriptor} should come around {_clock(result.next_time)}."
     )
+    return _with_heads_up(sentence, result.alert)
 
 
 def _format_no_service(result: NoServiceResult) -> str:
     target = result.target
     vehicles = _VEHICLE_PLURAL.get(target.route_type, "trips")
     toward = f" toward {target.direction_destination}" if target.direction_destination else ""
-    return f"There appear to be no {target.route_name} {vehicles}{toward} around you right now."
+    sentence = f"There appear to be no {target.route_name} {vehicles}{toward} around you right now."
+    return _with_heads_up(sentence, result.alert)
 
 
 def _clock(when: datetime) -> str:
@@ -193,6 +198,7 @@ _EFFECT_PHRASING = {
     "SHUTTLE": "shuttle buses are replacing service",
     "STATION_CLOSURE": "a station is closed",
     "STOP_CLOSURE": "a stop is closed",
+    "STATION_ISSUE": "there's a station issue",
     "DETOUR": "there's a detour",
     "DELAY": "there are delays",
     "SERVICE_CHANGE": "there's a service change",
@@ -247,6 +253,50 @@ def _ensure_period(text: str) -> str:
     if text and text[-1] not in ".!?":
         text += "."
     return text
+
+
+# --- service-aware predictions (one-line heads-up) --------------------------
+
+
+def _with_heads_up(sentence: str, alert: Alert | None) -> str:
+    """Append a single short heads-up about an active disruption, if there is one."""
+    if alert is None:
+        return sentence
+    phrase = _EFFECT_PHRASING.get(alert.effect, "there's a service alert")
+    return f"{sentence} Heads up — {phrase}."
+
+
+# --- system status ("how's the T right now?") -------------------------------
+
+# Raw MBTA effect -> a verb phrase that reads after a line name ("the Red Line ...").
+_LINE_EFFECT_PHRASING = {
+    "SUSPENSION": "is suspended",
+    "SHUTTLE": "has shuttle buses replacing service",
+    "STATION_CLOSURE": "has a station closed",
+    "STOP_CLOSURE": "has a stop closed",
+    "STATION_ISSUE": "has a station issue",
+    "DETOUR": "is on a detour",
+    "DELAY": "has delays",
+    "SERVICE_CHANGE": "has a service change",
+    "SCHEDULE_CHANGE": "has a schedule change",
+    "TRACK_CHANGE": "has a track change",
+    "SNOW_ROUTE": "is on snow routing",
+}
+
+
+def _format_system_status(result: SystemStatusResult) -> str:
+    if not result.affected:
+        return "Good news — the whole system is running normally right now."
+    parts = [
+        f"the {_speakable(line.label)} {_line_status_phrase(line.alert)}"
+        for line in result.affected
+    ]
+    body = _join_and(parts)
+    return f"{body[0].upper()}{body[1:]}; everything else is running normally."
+
+
+def _line_status_phrase(alert: Alert) -> str:
+    return _LINE_EFFECT_PHRASING.get(alert.effect, "has a service alert")
 
 
 # --- disambiguation ---------------------------------------------------------

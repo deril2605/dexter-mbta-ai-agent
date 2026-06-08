@@ -10,6 +10,8 @@ user-facing text. The formatter (M5) renders the reply.
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from datetime import datetime
 
 from dexter.mbta.alerts import AlertsService
@@ -20,7 +22,11 @@ from dexter.mbta.models import (
     Disambiguation,
     DisambiguationKind,
     FacilitiesResult,
+    NoServiceResult,
+    PredictionResult,
+    ScheduleResult,
     StopNotOnRoute,
+    SystemStatusResult,
 )
 from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver, match_disambiguation_option
@@ -52,9 +58,14 @@ async def predictions_node(
     *,
     resolver: Resolver,
     departures: DeparturesService,
+    alerts: AlertsService | None = None,
     now: datetime | None = None,
 ) -> dict:
-    """Resolve the slots and fetch departures (with schedule fallback)."""
+    """Resolve the slots and fetch departures (with schedule fallback).
+
+    ``alerts`` (optional) lets us attach a one-line heads-up about an active
+    disruption on the resolved route/stop — fetched concurrently with departures.
+    """
     # Pure follow-up ("and the one after?") with nothing new -> reuse last target,
     # advancing the departure window by the requested offset (paging forward).
     if (
@@ -65,7 +76,7 @@ async def predictions_node(
         and not state.get("direction_hint")
     ):
         cumulative = (state.get("last_offset") or 0) + (state.get("offset") or 0)
-        return await _fetch_for_target(state["last_target"], departures, now, cumulative)
+        return await _fetch_for_target(state["last_target"], departures, now, cumulative, alerts)
 
     slots = {
         "route": state.get("route"),
@@ -73,7 +84,9 @@ async def predictions_node(
         "direction_hint": state.get("direction_hint"),
     }
     # A fresh query starts at the soonest departure (offset is usually 0 here).
-    return await _resolve_and_fetch(slots, resolver, departures, now, state.get("offset") or 0)
+    return await _resolve_and_fetch(
+        slots, resolver, departures, now, state.get("offset") or 0, alerts
+    )
 
 
 async def clarify_node(
@@ -137,7 +150,7 @@ async def clarify_node(
                 stop_name=pending.stop_name or "",
                 direction_hint=option.label,
             )
-            return await _finish(resolved, base, departures, now)
+            return await _finish(resolved, base, departures, now, alerts)
 
         if pending.kind == DisambiguationKind.STOP and pending.options:
             if option is None:  # answer didn't match any offered stop — ask again
@@ -150,7 +163,7 @@ async def clarify_node(
                 stop_name=option.label,
                 direction_hint=base.get("direction_hint"),
             )
-            return await _finish(resolved, base, departures, now)
+            return await _finish(resolved, base, departures, now, alerts)
     except MBTARateLimitError:
         return {"result": ServiceError(kind="busy"), "needs_input": False}
     except (MBTAUnavailableError, MBTAError):
@@ -170,7 +183,7 @@ async def clarify_node(
             "location": message or base.get("location"),
             "direction_hint": base.get("direction_hint"),
         }
-    return await _resolve_and_fetch(slots, resolver, departures, now)
+    return await _resolve_and_fetch(slots, resolver, departures, now, 0, alerts)
 
 
 async def alerts_node(
@@ -207,6 +220,22 @@ async def facilities_node(
         facilities=facilities,
         now=now,
     )
+
+
+async def service_status_node(
+    state: AgentState,
+    *,
+    alerts: AlertsService,
+    now: datetime | None = None,
+) -> dict:
+    """Whole-system "how's the T right now?" — no route resolution, one alerts call."""
+    try:
+        affected = await alerts.get_system_alerts(now=now)
+    except MBTARateLimitError:
+        return {"result": ServiceError(kind="busy"), "needs_input": False}
+    except (MBTAUnavailableError, MBTAError):
+        return {"result": ServiceError(kind="unavailable"), "needs_input": False}
+    return {"result": SystemStatusResult(affected=affected), "needs_input": False}
 
 
 async def smalltalk_node(state: AgentState, *, router: Router) -> dict:
@@ -315,6 +344,7 @@ async def _resolve_and_fetch(
     departures: DeparturesService,
     now: datetime | None,
     offset: int = 0,
+    alerts: AlertsService | None = None,
 ) -> dict:
     try:
         resolved = await resolver.resolve(
@@ -338,7 +368,7 @@ async def _resolve_and_fetch(
                 "pending_intent": None,
                 "needs_input": False,
             }
-        result = await departures.get_departures(resolved, now=now, offset=offset)
+        result = await _departures_with_alert(resolved, departures, alerts, now, offset)
     except MBTARateLimitError:
         return {"result": ServiceError(kind="busy"), "needs_input": False}
     except (MBTAUnavailableError, MBTAError):
@@ -356,7 +386,11 @@ async def _resolve_and_fetch(
 
 
 async def _finish(
-    resolved, base: dict, departures: DeparturesService, now: datetime | None
+    resolved,
+    base: dict,
+    departures: DeparturesService,
+    now: datetime | None,
+    alerts: AlertsService | None = None,
 ) -> dict:
     """Turn a completed resolution into departures, or carry the next question."""
     if isinstance(resolved, Disambiguation):
@@ -367,7 +401,7 @@ async def _finish(
             "pending_intent": "predictions",
             "needs_input": True,
         }
-    result = await departures.get_departures(resolved, now=now)
+    result = await _departures_with_alert(resolved, departures, alerts, now)
     return {
         "result": result,
         "last_target": resolved,
@@ -380,12 +414,48 @@ async def _finish(
 
 
 async def _fetch_for_target(
-    target, departures: DeparturesService, now: datetime | None, offset: int = 0
+    target,
+    departures: DeparturesService,
+    now: datetime | None,
+    offset: int = 0,
+    alerts: AlertsService | None = None,
 ) -> dict:
     try:
-        result = await departures.get_departures(target, now=now, offset=offset)
+        result = await _departures_with_alert(target, departures, alerts, now, offset)
     except MBTARateLimitError:
         return {"result": ServiceError(kind="busy"), "needs_input": False}
     except (MBTAUnavailableError, MBTAError):
         return {"result": ServiceError(kind="unavailable"), "needs_input": False}
     return {"result": result, "last_target": target, "last_offset": offset, "needs_input": False}
+
+
+async def _departures_with_alert(
+    target,
+    departures: DeparturesService,
+    alerts: AlertsService | None,
+    now: datetime | None,
+    offset: int = 0,
+):
+    """Fetch departures and, concurrently, the top active alert for the same target.
+
+    The alert is a non-critical heads-up: it's fetched alongside departures (so it
+    adds no latency) and any alerts failure is swallowed — a missing heads-up must
+    never break the answer. Departures errors still propagate to the caller.
+    """
+    if alerts is None:
+        return await departures.get_departures(target, now=now, offset=offset)
+    result, found = await asyncio.gather(
+        departures.get_departures(target, now=now, offset=offset),
+        _safe_alerts(alerts, target, now),
+    )
+    if found and isinstance(result, PredictionResult | ScheduleResult | NoServiceResult):
+        return replace(result, alert=found[0])
+    return result
+
+
+async def _safe_alerts(alerts: AlertsService, target, now: datetime | None):
+    """Active alerts for a target's route/stop; ``()`` on any feed error (best-effort)."""
+    try:
+        return await alerts.get_alerts(route_id=target.route_id, stop_ids=target.stop_ids, now=now)
+    except (MBTARateLimitError, MBTAUnavailableError, MBTAError):
+        return ()

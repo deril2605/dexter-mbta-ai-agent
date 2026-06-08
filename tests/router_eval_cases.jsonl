@@ -32,3 +32,7 @@
 {"utterance": "is it running?", "history": [{"role": "user", "content": "any alerts on the Red Line?"}, {"role": "assistant", "content": "There are no current service alerts for the Red Line."}], "expected": {"intent": "alerts", "route": "Red Line"}}
 {"utterance": "what about the one after that?", "history": [{"role": "user", "content": "next 116 from Maverick toward Wonderland"}, {"role": "assistant", "content": "The next 116 toward Wonderland is in 4 minutes, then 12 and 19 minutes."}], "expected": {"intent": "predictions", "follow_up": true, "offset": 1}}
 {"utterance": "what about the 116 to Maverick", "history": [{"role": "user", "content": "when's the next Blue Line train to Government Center"}, {"role": "assistant", "content": "Which stop did you mean?"}, {"role": "user", "content": "airport"}, {"role": "assistant", "content": "The next Blue Line toward Bowdoin should come around 2:03 PM."}], "expected": {"intent": "predictions", "route": "116", "direction_hint": "Maverick"}, "forbid": ["location"]}
+{"utterance": "how's the T right now?", "expected": {"intent": "service_status"}}
+{"utterance": "are there any delays anywhere?", "expected": {"intent": "service_status"}}
+{"utterance": "is everything running ok on the subway?", "expected": {"intent": "service_status"}}
+{"utterance": "is the Orange Line delayed?", "expected": {"intent": "alerts", "route": "Orange Line"}}
