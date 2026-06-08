@@ -10,7 +10,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -194,9 +194,15 @@ def collect_config(args: argparse.Namespace, merged_env: dict[str, str]) -> Depl
         "AZURE_SUBSCRIPTION_ID",
         "Azure subscription ID",
     )
-    app_name = args.app_name or merged_env.get("AZURE_CONTAINERAPP_NAME", "").strip() or "dexter-beta"
+    app_name = (
+        args.app_name
+        or merged_env.get("AZURE_CONTAINERAPP_NAME", "").strip()
+        or "dexter-beta"
+    )
     resource_group = (
-        args.resource_group or merged_env.get("AZURE_RESOURCE_GROUP", "").strip() or f"{app_name}-rg"
+        args.resource_group
+        or merged_env.get("AZURE_RESOURCE_GROUP", "").strip()
+        or f"{app_name}-rg"
     )
     location = args.location or merged_env.get("AZURE_LOCATION", "").strip() or "eastus"
     environment_name = (
@@ -220,7 +226,9 @@ def collect_config(args: argparse.Namespace, merged_env: dict[str, str]) -> Depl
         or resource_group
     )
     image_repository = (
-        args.image_repository or merged_env.get("AZURE_CONTAINER_REPOSITORY", "").strip() or "dexter"
+        args.image_repository
+        or merged_env.get("AZURE_CONTAINER_REPOSITORY", "").strip()
+        or "dexter"
     )
     image_tag = (
         args.image_tag
@@ -333,7 +341,9 @@ def ensure_resource_group(
         info(f"Resource group {resource_group_name} exists; reusing it")
     except ResourceNotFoundError:
         info(f"Creating resource group {resource_group_name}")
-        resource_client.resource_groups.create_or_update(resource_group_name, {"location": location})
+        resource_client.resource_groups.create_or_update(
+            resource_group_name, {"location": location}
+        )
 
 
 def ensure_resource_groups(resource_client: ResourceManagementClient, config: DeployConfig) -> None:
@@ -406,7 +416,14 @@ def docker_build_and_push(
     docker_path = require_executable(config.docker_exe)
     info(f"Logging Docker into {config.registry_server}")
     run_subprocess(
-        [docker_path, "login", config.registry_server, "--username", registry_username, "--password-stdin"],
+        [
+            docker_path,
+            "login",
+            config.registry_server,
+            "--username",
+            registry_username,
+            "--password-stdin",
+        ],
         input_text=registry_password,
     )
 
@@ -650,7 +667,8 @@ def teardown(
 ) -> None:
     if not args.yes:
         confirm = input(
-            f"Delete ACA resources for '{config.app_name}' in '{config.resource_group}'? Type 'yes' to continue: "
+            f"Delete ACA resources for '{config.app_name}' in "
+            f"'{config.resource_group}'? Type 'yes' to continue: "
         ).strip()
         if confirm != "yes":
             fail("Teardown cancelled.")
@@ -691,7 +709,10 @@ def teardown(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Deploy or tear down the Dexter beta on Azure Container Apps using the Azure Python SDK."
+        description=(
+            "Deploy or tear down the Dexter beta on Azure Container Apps using "
+            "the Azure Python SDK."
+        )
     )
     parser.add_argument("--subscription-id")
     parser.add_argument("--resource-group")
@@ -776,7 +797,10 @@ def main() -> None:
     print()
     print(f"Dexter beta is live at: https://{fqdn}/")
     print(f"Resource group: {config.resource_group}")
-    print(f"Container Apps environment: {config.environment_name} ({config.environment_resource_group})")
+    print(
+        "Container Apps environment: "
+        f"{config.environment_name} ({config.environment_resource_group})"
+    )
     print(f"Registry: {config.registry_name}")
     print(f"Image: {config.image_reference}")
 
