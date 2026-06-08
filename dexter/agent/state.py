@@ -37,7 +37,14 @@ class SkillUnavailable:
 
 @dataclass(frozen=True, slots=True)
 class Fallback:
-    """The message didn't map to any supported skill."""
+    """The message didn't map to any supported skill.
+
+    ``kind`` shapes the reply: "smalltalk" for social/closing chit-chat (a brief,
+    warm acknowledgement) vs "offtopic" for a non-transit request (a gentle nudge
+    back to what Dexter can do).
+    """
+
+    kind: str = "offtopic"  # "smalltalk" | "offtopic"
 
 
 @dataclass(frozen=True, slots=True)

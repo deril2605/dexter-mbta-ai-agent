@@ -24,7 +24,11 @@ def test_health_ok():
     with TestClient(create_app(graph=FakeGraph())) as client:
         response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+    assert body["status"] == "ok"
+    # Defaults to the process start time, formatted as an Eastern label.
+    assert "deployed_at" in body
+    assert body["deployed_at"].endswith("ET")
 
 
 def test_chat_returns_reply_and_needs_input():

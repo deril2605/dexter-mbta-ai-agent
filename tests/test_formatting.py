@@ -249,6 +249,13 @@ def test_fallback_is_helpful():
     assert "next bus or train" in text
 
 
+def test_smalltalk_is_warm_not_a_capability_pitch():
+    # Closing/social chit-chat gets a brief acknowledgement, not the help blurb.
+    text = format_outcome(Fallback(kind="smalltalk"))
+    assert "Anytime" in text
+    assert "Try asking" not in text
+
+
 def test_format_node_records_turn_in_history_and_caps():
     prior = [{"role": "user", "content": "old"}] * MAX_HISTORY_MESSAGES
     update = format_node({"message": "next 116", "result": Fallback(), "history": prior})

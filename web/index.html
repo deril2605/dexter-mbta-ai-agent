@@ -37,6 +37,7 @@
     user-select: none;
   }
   #titlebar b { color: var(--accent); }
+  #deploymeta { display: block; margin-top: 4px; font-size: 13px; }
   #log {
     flex: 1;
     overflow-y: auto;
@@ -65,16 +66,72 @@
   #entry:disabled { opacity: 0.5; }
   .cursor { animation: blink 1.1s steps(1) infinite; color: var(--accent); }
   @keyframes blink { 50% { opacity: 0; } }
+
+  /* --- passcode gate modal --- */
+  #gate[hidden] { display: none; }
+  #gate {
+    position: fixed;
+    inset: 0;
+    background: rgba(4, 8, 4, 0.72);
+    backdrop-filter: blur(2px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+  }
+  .gate-box {
+    width: min(400px, calc(100% - 32px));
+    background: #0d130d;
+    border: 1px solid #294029;
+    box-shadow: 0 0 0 1px #0b0f0b, 0 18px 60px rgba(0, 0, 0, 0.6);
+    padding: 18px;
+  }
+  .gate-title { color: var(--accent); margin-bottom: 10px; }
+  .gate-title::before { content: "▌ "; }
+  .gate-msg { color: var(--dim); margin-bottom: 14px; }
+  .gate-field { display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid #294029; padding-bottom: 6px; }
+  .gate-field > span { color: var(--accent); user-select: none; }
+  #gate-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--fg);
+    font: inherit;
+    caret-color: var(--accent);
+    /* Mask the code via CSS instead of a real password input, so Chrome's
+       password manager never offers to save it (it was nagging on every send). */
+    -webkit-text-security: disc;
+    text-security: disc;
+  }
+  #gate-error { color: var(--err); margin-top: 10px; min-height: 1.2em; }
+  #gate-error[hidden] { display: block; visibility: hidden; }
+  .gate-hint { color: var(--dim); margin-top: 12px; font-size: 13px; }
 </style>
 </head>
 <body>
   <div id="screen">
-    <div id="titlebar"><b>dexter</b> — MBTA transit assistant · <span>prototype build</span></div>
+    <div id="titlebar"><b>dexter</b> — MBTA transit assistant · <span>prototype build</span><span id="deploymeta">last redeployed: checking...</span></div>
     <div id="log" aria-live="polite"></div>
     <div id="inputline">
       <span id="prompt">you&gt;</span>
       <input id="entry" autocomplete="off" autocapitalize="off" autocorrect="off"
              spellcheck="false" aria-label="message" />
+    </div>
+  </div>
+
+  <div id="gate" hidden>
+    <div class="gate-box" role="dialog" aria-modal="true" aria-labelledby="gate-title">
+      <div class="gate-title" id="gate-title">beta access</div>
+      <div class="gate-msg">This is a private beta. Enter your access code to continue.</div>
+      <div class="gate-field">
+        <span>code&gt;</span>
+        <input id="gate-input" type="text" name="dexter-access-code" autocomplete="off"
+               autocapitalize="off" autocorrect="off" spellcheck="false"
+               aria-label="beta access code" />
+      </div>
+      <div id="gate-error" hidden>That code didn't work. Try again.</div>
+      <div class="gate-hint">Press Enter to submit.</div>
     </div>
   </div>
 
@@ -84,6 +141,10 @@
 // --- dumb client: only talks to /chat. No transit logic lives here. ---
 const log = document.getElementById("log");
 const entry = document.getElementById("entry");
+const deployMeta = document.getElementById("deploymeta");
+const gate = document.getElementById("gate");
+const gateInput = document.getElementById("gate-input");
+const gateError = document.getElementById("gate-error");
 
 // Anonymous, per-tab session id so multi-turn follow-ups group correctly.
 let sessionId = sessionStorage.getItem("dexter_sid");
@@ -94,8 +155,7 @@ if (!sessionId) {
 }
 
 let passcode = sessionStorage.getItem("dexter_pass") || null;
-let awaitingPasscode = false;
-let pendingMessage = null; // message to retry after a passcode is supplied
+let pendingMessage = null; // message to retry once a passcode is supplied
 let busy = false;
 
 function addLine(text, cls) {
@@ -118,13 +178,17 @@ function addLine(text, cls) {
 // Typewriter reveal of dexter's reply — purely cosmetic, the full text already
 // arrived from the server.
 async function typeReply(text) {
-  const div = addLine("", "dex");
+  // Build the line directly (not via addLine) so the "dexter> " prefix is added
+  // exactly once, then reveal the body character by character.
+  const div = document.createElement("div");
+  div.className = "line dex";
   const who = document.createElement("span");
   who.className = "who";
   who.textContent = "dexter> ";
   div.appendChild(who);
   const body = document.createTextNode("");
   div.appendChild(body);
+  log.appendChild(div);
   const step = text.length > 160 ? 3 : 1; // reveal long replies faster
   for (let i = 0; i < text.length; i += step) {
     body.textContent = text.slice(0, i + step);
@@ -151,20 +215,22 @@ async function sendChat(message) {
   return (await res.json()).reply || "";
 }
 
-function promptForPasscode() {
-  awaitingPasscode = true;
-  entry.type = "password";
-  document.getElementById("prompt").textContent = "passcode>";
+function openGate() {
+  gateError.hidden = true;
+  gateInput.value = "";
+  entry.disabled = true; // freeze the terminal behind the modal
+  gate.hidden = false;
+  gateInput.focus();
 }
 
-function clearPasscodePrompt() {
-  awaitingPasscode = false;
-  entry.type = "text";
-  document.getElementById("prompt").textContent = "you>";
+function closeGate() {
+  gate.hidden = true;
+  entry.disabled = false;
+  entry.focus();
 }
 
-// Send a real user message; on 401, stash it and ask for the passcode so the
-// gate only ever appears when the server actually requires it.
+// Send a real user message; on 401, stash it and raise the access-code modal so
+// the gate only ever appears when the server actually requires it.
 async function deliver(message, { echo }) {
   if (echo) addLine(message, "you");
   const thinking = addLine("…thinking", "sys");
@@ -176,26 +242,42 @@ async function deliver(message, { echo }) {
     thinking.remove();
     if (String(e.message) === "unauthorized") {
       pendingMessage = message;
-      addLine("This beta is gated. Enter the passcode to continue.", "sys");
-      promptForPasscode();
+      openGate();
     } else {
       addLine("Couldn't reach Dexter. Try again in a moment.", "err");
     }
   }
 }
 
-async function handle(message) {
-  if (awaitingPasscode) {
-    passcode = message;
+// Validate the entered code by retrying the pending message with it. On success
+// the modal closes and the conversation resumes; on failure it stays open.
+async function submitGate() {
+  const code = gateInput.value.trim();
+  if (!code || busy) return;
+  passcode = code;
+  busy = true;
+  gateInput.disabled = true;
+  gateError.hidden = true;
+  try {
+    const reply = await sendChat(pendingMessage);
     sessionStorage.setItem("dexter_pass", passcode);
-    clearPasscodePrompt();
-    const retry = pendingMessage;
     pendingMessage = null;
-    // Re-send the original message (not echoed again) now that we have a code.
-    if (retry) await deliver(retry, { echo: false });
-    return;
+    closeGate();
+    await typeReply(reply); // the original message was already echoed
+  } catch (e) {
+    if (String(e.message) === "unauthorized") {
+      gateError.textContent = "That code didn't work. Try again.";
+      gateError.hidden = false;
+      gateInput.value = "";
+      gateInput.focus();
+    } else {
+      gateError.textContent = "Couldn't reach Dexter. Try again in a moment.";
+      gateError.hidden = false;
+    }
+  } finally {
+    gateInput.disabled = false;
+    busy = false;
   }
-  await deliver(message, { echo: true });
 }
 
 entry.addEventListener("keydown", async (ev) => {
@@ -206,18 +288,42 @@ entry.addEventListener("keydown", async (ev) => {
   busy = true;
   entry.disabled = true;
   try {
-    await handle(message);
+    await deliver(message, { echo: true });
   } finally {
     busy = false;
-    entry.disabled = false;
-    entry.focus();
+    // Leave the terminal frozen if the gate opened; re-enable otherwise.
+    if (gate.hidden) {
+      entry.disabled = false;
+      entry.focus();
+    }
   }
 });
+
+gateInput.addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    ev.preventDefault();
+    submitGate();
+  }
+});
+
+async function loadDeployMeta() {
+  try {
+    const res = await fetch("/health");
+    if (!res.ok) throw new Error("http " + res.status);
+    const data = await res.json();
+    deployMeta.textContent = data.deployed_at
+      ? "last redeployed: " + data.deployed_at
+      : "last redeployed: unavailable";
+  } catch (_e) {
+    deployMeta.textContent = "last redeployed: unavailable";
+  }
+}
 
 // Boot. No upfront passcode prompt — if the server is gated, the first message
 // returns 401 and we ask then; if it isn't, the user is never bothered.
 addLine("Dexter — ask about the next MBTA bus or train.", "sys");
 addLine('e.g. "when\'s the next 1 bus to Harvard?"', "sys");
+loadDeployMeta();
 entry.focus();
 </script>
 </body>

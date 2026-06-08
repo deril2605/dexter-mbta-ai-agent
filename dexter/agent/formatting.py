@@ -23,7 +23,7 @@ from dexter.mbta.models import (
     StopNotOnRoute,
 )
 
-from .state import AgentState, ServiceError, SkillUnavailable
+from .state import AgentState, Fallback, ServiceError, SkillUnavailable
 
 _VEHICLE_PLURAL = {0: "trains", 1: "trains", 2: "trains", 3: "buses", 4: "ferries"}
 
@@ -69,6 +69,8 @@ def format_outcome(outcome) -> str:
             return _format_skill_unavailable(outcome)
         case ServiceError():
             return _format_service_error(outcome)
+        case Fallback(kind="smalltalk"):
+            return _format_smalltalk()
         case _:
             return _format_fallback()
 
@@ -293,6 +295,12 @@ def _format_fallback() -> str:
         "I can tell you when the next bus or train is coming. "
         "Try asking something like: when's the next 116 from Bennington Street toward Maverick?"
     )
+
+
+def _format_smalltalk() -> str:
+    # Social / closing chit-chat: acknowledge warmly and briefly, and leave the
+    # door open without re-pitching the capabilities blurb.
+    return "Anytime — just ask whenever you need the next bus or train."
 
 
 # --- helpers ----------------------------------------------------------------

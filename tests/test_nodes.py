@@ -382,6 +382,15 @@ async def test_fallback_node():
     assert update["result"] == Fallback()
 
 
+async def test_fallback_node_smalltalk_kind():
+    # Social/closing chit-chat is tagged so the formatter can answer warmly.
+    update = await fallback_node({"message": "no that's enough", "intent": "smalltalk"})
+    assert update["result"] == Fallback(kind="smalltalk")
+
+    offtopic = await fallback_node({"message": "tell me a joke", "intent": "unknown"})
+    assert offtopic["result"] == Fallback(kind="offtopic")
+
+
 async def test_no_service_outcome_propagates(deps):
     # Predictions empty + schedule empty -> NoServiceResult flows through the node.
     deps.respx.get(f"{MBTA_BASE_URL}/stops").mock(

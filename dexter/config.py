@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     # off/unset by default so the Phase 1 app and tests are unaffected.
     dexter_serve_web: bool = False
     dexter_passcode: str | None = None
+    dexter_deployed_at: str | None = None
 
     # --- Observability (optional, off by default) ---
     dexter_tracing: bool = False

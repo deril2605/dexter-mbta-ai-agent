@@ -25,7 +25,10 @@ def configure_tracing(settings) -> bool:
     Heavy imports happen only here, so the rest of the app stays light when off.
     """
     global _configured
-    if _configured or not getattr(settings, "dexter_tracing", False):
+    if _configured:
+        return False
+    if not getattr(settings, "dexter_tracing", False):
+        logger.info("tracing disabled (DEXTER_TRACING is off)")
         return False
 
     try:
@@ -41,15 +44,28 @@ def configure_tracing(settings) -> bool:
     endpoint = getattr(settings, "dexter_tracing_endpoint", None)
     if endpoint:
         kwargs["endpoint"] = endpoint
-    # Phoenix Cloud authenticates the OTLP exporter via an `api_key` header.
-    # Absent (local Phoenix) this stays unset, preserving prior behavior.
+    # Phoenix Cloud authenticates the OTLP exporter via `authorization: Bearer <key>`
+    # (sending only `api_key` returns 401). We send both so self-hosted Phoenix,
+    # which accepts `api_key`, also works. Absent (local Phoenix) headers stay unset.
     api_key = getattr(settings, "dexter_tracing_api_key", None)
     if api_key:
-        kwargs["headers"] = {"api_key": api_key}
+        kwargs["headers"] = {
+            "authorization": f"Bearer {api_key}",
+            "api_key": api_key,
+        }
+
+    # Log the resolved config (never the key) so a deployed instance shows in its
+    # logs exactly where spans are headed — the first thing to check when traces
+    # "never arrive". `endpoint` ending in /v1/traces => HTTP; bare host => gRPC.
+    logger.info(
+        "configuring tracing: project=dexter endpoint=%s auth_header=%s",
+        endpoint or "<phoenix default>",
+        "set" if api_key else "none",
+    )
     register(**kwargs)
 
     _configured = True
-    logger.info("tracing enabled (Phoenix / OpenInference)")
+    logger.info("tracing enabled (Phoenix / OpenInference) — project 'dexter'")
     return True
 
 

@@ -210,7 +210,8 @@ async def facilities_node(
 
 
 async def fallback_node(state: AgentState) -> dict:
-    return {"result": Fallback(), "needs_input": False}
+    kind = "smalltalk" if state.get("intent") == "smalltalk" else "offtopic"
+    return {"result": Fallback(kind=kind), "needs_input": False}
 
 
 # --- alerts / facilities resolution (shared by the node and clarify) ---------

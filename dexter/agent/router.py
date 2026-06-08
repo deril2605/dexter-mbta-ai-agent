@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-INTENTS = ("predictions", "alerts", "facilities", "unknown")
+INTENTS = ("predictions", "alerts", "facilities", "smalltalk", "unknown")
 TOOL_NAME = "extract_transit_query"
 
 SYSTEM_PROMPT = """You are the intent router for Dexter, an MBTA (Boston) transit assistant.
@@ -36,7 +36,11 @@ intent:
 (e.g. "when's the next 116 from Bennington Street toward Maverick").
 - "alerts": service alerts, delays, disruptions ("is the Blue Line down?").
 - "facilities": elevators or escalators ("is the elevator at Park St working?").
-- "unknown": anything not about MBTA transit.
+- "smalltalk": social conversation, not a request for transit info — greetings ("hi"), \
+thanks ("thank you"), acknowledgements or sign-offs ("no that's enough", "that's all", \
+"ok cool", "bye"). Prefer this over "unknown" for anything conversational.
+- "unknown": an actual question or request that isn't about MBTA transit \
+("what's the weather?", "tell me a joke").
 
 slots (leave a slot out when it isn't present, unless it carries over from context above):
 - route: the route the user means — as they said it ("116", "Blue Line", "Green Line B"), or \
