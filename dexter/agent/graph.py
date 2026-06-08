@@ -31,6 +31,7 @@ from .nodes import (
     fallback_node,
     predictions_node,
     router_node,
+    smalltalk_node,
 )
 from .router import Router
 from .state import AgentState
@@ -39,6 +40,7 @@ _INTENT_TO_NODE = {
     "predictions": "predictions",
     "alerts": "alerts",
     "facilities": "facilities",
+    "smalltalk": "smalltalk",
 }
 
 
@@ -120,6 +122,7 @@ def build_graph(
             facilities_node, resolver=resolver, stations=stations, facilities=facilities
         ),
     )
+    builder.add_node("smalltalk", functools.partial(smalltalk_node, router=router))
     builder.add_node("fallback", fallback_node)
     builder.add_node("format", format_node)
 
@@ -132,10 +135,11 @@ def build_graph(
             "predictions": "predictions",
             "alerts": "alerts",
             "facilities": "facilities",
+            "smalltalk": "smalltalk",
             "fallback": "fallback",
         },
     )
-    for node in ("predictions", "clarify", "alerts", "facilities", "fallback"):
+    for node in ("predictions", "clarify", "alerts", "facilities", "smalltalk", "fallback"):
         builder.add_edge(node, "format")
     builder.add_edge("format", END)
 

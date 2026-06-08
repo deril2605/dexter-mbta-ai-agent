@@ -309,6 +309,29 @@ keeping the option to tear it all out trivially.
 
 ---
 
+## Phase 1.5 — Conversational smalltalk, the right way (2026-06-08)
+
+Beta feedback: a greeting ("hi") got a canned line ("Anytime — just ask…"), which read
+like a robot. First attempt template-matched smalltalk to one fixed string — still wrong,
+because greeting / thanks / sign-off all collapsed to the same sentence.
+
+- **Let the model write social replies; keep facts templated.** Added a `smalltalk`
+  intent and a dedicated `Router.smalltalk()` LLM call that writes one short, natural,
+  contextual sentence (greeting greets back, thanks gets "you're welcome"). The reply is
+  carried as a `SmallTalk(text=...)` outcome and rendered verbatim.
+- **This is not a violation of "the LLM never produces user text."** That invariant exists
+  to prevent **fabricated times/transit facts**. The smalltalk prompt forbids any transit
+  specifics, and the node only runs for the `smalltalk` intent — real departures still come
+  from templates. A misclassified transit question fails safe (a friendly "what route?",
+  never an invented time).
+- **Cost is a second LLM call, but only on social turns** (rare), so latency on the hot
+  predictions path is unchanged. Used temperature 0.6 here for warmth/variety vs the
+  router's 0.0 deterministic extraction.
+- **Lesson:** "LLM-free for facts" ≠ "LLM-free for everything." Draw the safety boundary
+  around the thing that can actually be wrong (times), and let the model be human elsewhere.
+
+---
+
 ## TL;DR — lessons worth carrying forward
 
 - **Measure before optimizing.** Tracing turned a "latency vibe" into "the LLM is 98% of

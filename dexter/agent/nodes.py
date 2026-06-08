@@ -26,8 +26,8 @@ from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver, match_disambiguation_option
 from dexter.mbta.stations import StationCache
 
-from .router import Router
-from .state import AgentState, Fallback, ServiceError
+from .router import DEFAULT_SMALLTALK, Router
+from .state import AgentState, Fallback, ServiceError, SmallTalk
 
 
 async def router_node(state: AgentState, *, router: Router) -> dict:
@@ -209,9 +209,17 @@ async def facilities_node(
     )
 
 
+async def smalltalk_node(state: AgentState, *, router: Router) -> dict:
+    """Answer a social (non-transit) message with a model-written reply."""
+    try:
+        reply = await router.smalltalk(state["message"], history=state.get("history"))
+    except Exception:  # noqa: BLE001 - a social turn must never error out
+        reply = DEFAULT_SMALLTALK
+    return {"result": SmallTalk(text=reply), "needs_input": False}
+
+
 async def fallback_node(state: AgentState) -> dict:
-    kind = "smalltalk" if state.get("intent") == "smalltalk" else "offtopic"
-    return {"result": Fallback(kind=kind), "needs_input": False}
+    return {"result": Fallback(), "needs_input": False}
 
 
 # --- alerts / facilities resolution (shared by the node and clarify) ---------

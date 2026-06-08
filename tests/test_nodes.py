@@ -18,8 +18,9 @@ from dexter.agent.nodes import (
     facilities_node,
     fallback_node,
     predictions_node,
+    smalltalk_node,
 )
-from dexter.agent.state import Fallback, ServiceError
+from dexter.agent.state import Fallback, ServiceError, SmallTalk
 from dexter.mbta.alerts import AlertsService
 from dexter.mbta.client import MBTAClient
 from dexter.mbta.facilities import FacilitiesService
@@ -382,13 +383,30 @@ async def test_fallback_node():
     assert update["result"] == Fallback()
 
 
-async def test_fallback_node_smalltalk_kind():
-    # Social/closing chit-chat is tagged so the formatter can answer warmly.
-    update = await fallback_node({"message": "no that's enough", "intent": "smalltalk"})
-    assert update["result"] == Fallback(kind="smalltalk")
+async def test_smalltalk_node_uses_model_reply():
+    class FakeRouter:
+        def __init__(self):
+            self.seen = None
 
-    offtopic = await fallback_node({"message": "tell me a joke", "intent": "unknown"})
-    assert offtopic["result"] == Fallback(kind="offtopic")
+        async def smalltalk(self, message, *, history=None):
+            self.seen = (message, history)
+            return "Hi there! Where are you headed?"
+
+    router = FakeRouter()
+    update = await smalltalk_node({"message": "hello", "history": []}, router=router)
+
+    assert update["result"] == SmallTalk(text="Hi there! Where are you headed?")
+    assert router.seen == ("hello", [])
+
+
+async def test_smalltalk_node_survives_model_error():
+    class BoomRouter:
+        async def smalltalk(self, *_args, **_kwargs):
+            raise RuntimeError("llm down")
+
+    update = await smalltalk_node({"message": "hi"}, router=BoomRouter())
+    assert isinstance(update["result"], SmallTalk)
+    assert update["result"].text  # falls back to a default greeting, never blank
 
 
 async def test_no_service_outcome_propagates(deps):

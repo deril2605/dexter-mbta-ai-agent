@@ -36,15 +36,19 @@ class SkillUnavailable:
 
 
 @dataclass(frozen=True, slots=True)
-class Fallback:
-    """The message didn't map to any supported skill.
+class SmallTalk:
+    """A conversational, non-transit reply written by the model (greeting/thanks/sign-off).
 
-    ``kind`` shapes the reply: "smalltalk" for social/closing chit-chat (a brief,
-    warm acknowledgement) vs "offtopic" for a non-transit request (a gentle nudge
-    back to what Dexter can do).
+    ``text`` is the LLM's reply, rendered as-is. The model is constrained to never
+    state transit facts here, so no times can leak — those stay templated.
     """
 
-    kind: str = "offtopic"  # "smalltalk" | "offtopic"
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class Fallback:
+    """A non-transit request that isn't social chit-chat — nudge back to Dexter's job."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +68,7 @@ Outcome = (
     | StopNotOnRoute
     | Disambiguation
     | SkillUnavailable
+    | SmallTalk
     | Fallback
     | ServiceError
 )

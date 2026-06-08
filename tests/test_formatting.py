@@ -6,7 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from dexter.agent.formatting import MAX_HISTORY_MESSAGES, format_node, format_outcome
-from dexter.agent.state import Fallback, ServiceError, SkillUnavailable
+from dexter.agent.state import Fallback, ServiceError, SkillUnavailable, SmallTalk
 from dexter.mbta.models import (
     Alert,
     AlertsResult,
@@ -249,11 +249,10 @@ def test_fallback_is_helpful():
     assert "next bus or train" in text
 
 
-def test_smalltalk_is_warm_not_a_capability_pitch():
-    # Closing/social chit-chat gets a brief acknowledgement, not the help blurb.
-    text = format_outcome(Fallback(kind="smalltalk"))
-    assert "Anytime" in text
-    assert "Try asking" not in text
+def test_smalltalk_renders_model_text_verbatim():
+    # The model writes the social reply; the formatter passes it through unchanged.
+    text = format_outcome(SmallTalk(text="Hey there! What route are you taking?"))
+    assert text == "Hey there! What route are you taking?"
 
 
 def test_format_node_records_turn_in_history_and_caps():

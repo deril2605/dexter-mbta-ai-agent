@@ -79,6 +79,17 @@ _TOOL = {
 }
 
 
+SMALLTALK_PROMPT = """You are Dexter, a warm and concise assistant for the MBTA (Boston) transit \
+system. The user said something conversational — a greeting, thanks, or a sign-off — not a transit \
+question. Reply in ONE short, friendly, natural sentence:
+- If they greeted you, greet them back and invite them to ask about the next bus or train.
+- If they thanked you or are wrapping up, acknowledge warmly and let them know you're around.
+Never state arrival times, schedules, routes, or any other transit facts. Plain text, no emojis."""
+
+# Used only if the smalltalk model call fails — never leave a social turn unanswered.
+DEFAULT_SMALLTALK = "Hi! Ask me when the next bus or train is coming."
+
+
 @dataclass(frozen=True, slots=True)
 class RouterSlots:
     intent: str
@@ -120,6 +131,30 @@ class Router:
             max_completion_tokens=self._max_completion_tokens,
         )
         return _parse_response(response)
+
+    async def smalltalk(self, message: str, *, history: list[dict] | None = None) -> str:
+        """Generate a brief, natural reply to a social (non-transit) message.
+
+        Safe to let the model write freely here: the prompt forbids transit facts,
+        and this is only invoked for the ``smalltalk`` intent — all real departure
+        info still comes from templates, never the LLM.
+        """
+        messages: list[dict] = [{"role": "system", "content": SMALLTALK_PROMPT}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": message})
+
+        response = await self._client.chat.completions.create(
+            model=self._deployment,
+            messages=messages,
+            temperature=0.6,  # a little warmth/variety; no facts at stake
+            max_completion_tokens=60,
+        )
+        try:
+            text = (response.choices[0].message.content or "").strip()
+        except (AttributeError, IndexError, TypeError):
+            return DEFAULT_SMALLTALK
+        return text or DEFAULT_SMALLTALK
 
 
 def _parse_response(response) -> RouterSlots:
