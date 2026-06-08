@@ -23,6 +23,8 @@ The deploy flow is Python-based and does not require the Azure CLI.
 - The image is built locally with Docker from the repo root, then pushed to ACR.
 - For this repo, prefer `uv run python deploy/deploy.py` so the deploy uses the
   repo virtualenv and its installed Azure SDK packages.
+- GitHub Actions can also deploy the app after merges to `main`; see
+  [GitHub Actions CD](#github-actions-cd).
 
 The script is create-or-update:
 - If the resource group, ACR, Container Apps environment, or app already exist, it reuses them.
@@ -173,6 +175,87 @@ If you want a custom image tag for a given push:
 ```
 
 If you leave `AZURE_CONTAINER_IMAGE_TAG` blank, the script uses a UTC timestamp tag.
+
+## GitHub Actions CD
+
+This repo can deploy through GitHub Actions instead of relying on a laptop-local
+Docker build.
+
+Workflows:
+- `.github/workflows/ci.yml`
+  - runs on `pull_request`
+  - installs dependencies with `uv`
+  - runs `ruff check .`
+  - runs `pytest`
+  - never authenticates to Azure
+- `.github/workflows/deploy.yml`
+  - runs on `push` to `main`
+  - also supports `workflow_dispatch`
+  - builds a Docker image from `deploy/Dockerfile`
+  - pushes the image to `dealsignalacr12345.azurecr.io/dexter:<commit-sha>`
+  - updates ACA app `dexter-beta`
+  - stamps `DEXTER_DEPLOYED_AT`
+  - smoke-tests `/health`
+
+### Why this flow is safer than calling `deploy.py` from CI
+
+The local deploy script is intentionally broad: it can check providers, create
+shared resources, enable the ACR admin user, and assign `AcrPull`.
+
+The GitHub Actions deploy path is intentionally narrower:
+- it assumes the shared RG, CAE, and ACR already exist
+- it pushes a new image
+- it updates the existing Container App
+- it does not attempt shared-infra bootstrap or Azure role assignment
+
+For a public repository, prefer the narrower CI/CD identity.
+
+### Required GitHub configuration
+
+Use a GitHub Environment named `production`.
+
+Recommended:
+- require approval before deployment
+- restrict who can approve production deploys
+
+The deploy workflow expects repository or environment variables:
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+
+These are not treated as secrets in the workflow design. Authentication should
+use OIDC federation, not a long-lived client secret.
+
+### Required Azure configuration for GitHub Actions
+
+Create or reuse a Microsoft Entra application / service principal for GitHub
+Actions and add a federated credential that trusts this repository.
+
+Recommended scope for the federated credential:
+- repository: this repo
+- branch or environment: `main` or `production`
+
+Recommended minimum Azure roles for the GitHub Actions identity:
+- on ACR `dealsignalacr12345`: `AcrPush`
+- on RG `rg-dealsignal-prod`: `Contributor`
+
+Notes:
+- `AcrPush` is enough for pushing images to ACR.
+- `Contributor` on the shared RG covers updating ACA resources.
+- unlike the local deploy script, the workflow should not need
+  `User Access Administrator` if `AcrPull` is already configured on the app's
+  managed identity.
+
+### Public repo security notes
+
+This repository is public, so keep the deploy workflow restricted:
+- do not deploy from `pull_request`
+- do not expose deployment credentials to PR workflows
+- keep Azure auth on `push` to `main` and `workflow_dispatch` only
+- prefer OIDC over client secrets
+
+GitHub does not pass repository secrets to workflows triggered from forked PRs,
+which is one reason deployment should stay on post-merge events.
 
 ## Shared-infra access
 
