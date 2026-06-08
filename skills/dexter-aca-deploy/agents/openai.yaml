@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dexter ACA Deploy"
+  short_description: "Redeploy Dexter to shared Azure Container Apps"
+  default_prompt: "Use $dexter-aca-deploy to redeploy the MBTA Dexter app to its shared Azure Container Apps environment."
