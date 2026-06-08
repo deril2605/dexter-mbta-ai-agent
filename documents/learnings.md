@@ -332,6 +332,32 @@ because greeting / thanks / sign-off all collapsed to the same sentence.
 
 ---
 
+## Phase 1.5 — GitHub Actions CD for a public repo, the careful way (2026-06-08)
+
+Goal: stop relying on a laptop-local Docker build for production deploys while
+keeping the shared Azure setup safe enough for a public repository.
+
+- **Split CI from CD.** Pull requests now run validation only; production deploys
+  happen only on `push` to `main` or manual dispatch. That keeps untrusted PRs
+  away from Azure access entirely.
+- **OIDC beat secrets.** For a public repo, storing a long-lived Azure client
+  secret in GitHub would be the easy path and the wrong one. Switched to GitHub
+  OIDC + a federated credential on an Entra app, so GitHub only presents a
+  signed identity assertion and Azure issues the token.
+- **Narrower than `deploy.py` on purpose.** The local deploy script can create
+  resources, enable ACR admin access, and manage shared infra. The GitHub
+  workflow should not. It only builds, pushes, updates the existing Container
+  App, and smoke-tests `/health`.
+- **Environment protection is part of the trust model.** Using the GitHub
+  `production` environment in both GitHub and the Azure federated credential
+  ties approval and authentication together cleanly.
+- **A visible deploy signal matters.** The app already exposed a deploy-time
+  stamp through the UI header; that became the perfect sanity check that the CD
+  path really updated production. Seeing `last redeployed` change proved the
+  merge-to-ACA path end to end without needing deeper observability first.
+- **Public repo lesson:** the main risk is not GitHub Actions billing. Standard
+  runners are effectively free here; the real concerns are credential shape,
+  blast radius, and keeping the deployment identity as narrow as possible.
 ## Shipping mode: the "service-aware" bundle (v1.1)
 
 Pivoted from the hardening backlog (CI/perf) to rider-facing features, prioritized against

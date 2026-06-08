@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "dexter/**"
+      - "web/**"
+      - "deploy/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/deploy.yml"
   workflow_dispatch:
 
 permissions:
