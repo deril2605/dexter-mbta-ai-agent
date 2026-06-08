@@ -14,12 +14,14 @@ from dexter.mbta.models import (
     DisambiguationKind,
     DisambiguationOption,
     FacilitiesResult,
+    LineStatus,
     NoServiceResult,
     PredictionResult,
     ResolvedTarget,
     Route,
     ScheduleResult,
     StopNotOnRoute,
+    SystemStatusResult,
 )
 
 EASTERN = ZoneInfo("America/New_York")
@@ -273,6 +275,81 @@ def test_format_node_adds_reclarify_prefix_and_resets_flag():
     update = format_node({"result": direction, "reclarify": True})
     assert update["reply"].startswith("Sorry, I didn't catch that. Which direction")
     assert update["reclarify"] is False  # flag cleared after use
+
+
+# --- service-aware predictions (heads-up) -----------------------------------
+
+
+def test_predictions_append_heads_up_when_alert_present():
+    result = PredictionResult(
+        target=target(route_name="Orange Line", route_type=1, dest="Oak Grove"),
+        minutes_away=(3, 9),
+        alert=Alert(header="Orange Line delays.", effect="DELAY", severity=4),
+    )
+    text = format_outcome(result)
+    assert "is in 3 minutes, then 9 minutes." in text
+    assert text.endswith("Heads up — there are delays.")
+
+
+def test_predictions_no_heads_up_when_no_alert():
+    text = format_outcome(PredictionResult(target=target(), minutes_away=(4, 12)))
+    assert "Heads up" not in text
+
+
+def test_schedule_appends_heads_up():
+    when = datetime(2026, 6, 6, 23, 42, tzinfo=EASTERN)
+    result = ScheduleResult(
+        target=target(),
+        next_time=when,
+        alert=Alert(header="", effect="DETOUR", severity=3),
+    )
+    text = format_outcome(result)
+    assert "11:42 PM." in text
+    assert text.endswith("Heads up — there's a detour.")
+
+
+def test_no_service_appends_explanatory_heads_up():
+    result = NoServiceResult(
+        target=target(route_name="Blue Line", route_type=1, dest="Bowdoin"),
+        alert=Alert(header="", effect="SUSPENSION", severity=9),
+    )
+    text = format_outcome(result)
+    assert "no Blue Line trains toward Bowdoin" in text
+    assert text.endswith("Heads up — service is suspended.")
+
+
+# --- system status ----------------------------------------------------------
+
+
+def test_system_status_summarizes_affected_lines():
+    result = SystemStatusResult(
+        affected=(
+            LineStatus(label="Red Line", alert=Alert(header="", effect="DELAY", severity=5)),
+            LineStatus(
+                label="Orange Line", alert=Alert(header="", effect="SUSPENSION", severity=9)
+            ),
+        )
+    )
+    text = format_outcome(result)
+    assert text == (
+        "The Red Line has delays and the Orange Line is suspended; "
+        "everything else is running normally."
+    )
+
+
+def test_system_status_single_line():
+    result = SystemStatusResult(
+        affected=(LineStatus(label="Green Line", alert=Alert(header="", effect="SHUTTLE")),)
+    )
+    text = format_outcome(result)
+    assert text == (
+        "The Green Line has shuttle buses replacing service; everything else is running normally."
+    )
+
+
+def test_system_status_all_normal():
+    text = format_outcome(SystemStatusResult(affected=()))
+    assert "whole system is running normally" in text
 
 
 def test_no_ids_or_json_in_outputs():

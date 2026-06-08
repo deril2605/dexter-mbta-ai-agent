@@ -97,6 +97,57 @@ async def test_get_alerts_adds_stop_filter(respx_mock):
     assert params["filter[stop]"] == "a,b"
 
 
+# --- AlertsService.get_system_alerts (system status) ------------------------
+
+
+def sys_alert(effect: str, severity: int, routes: list[str], header: str = "") -> dict:
+    """An alert carrying informed_entity route ids (for system-status grouping)."""
+    return {
+        "type": "alert",
+        "id": header or effect,
+        "attributes": {
+            "effect": effect,
+            "severity": severity,
+            "header": header,
+            "short_header": header,
+            "informed_entity": [{"route": r} for r in routes],
+        },
+    }
+
+
+async def test_get_system_alerts_groups_worst_per_line(respx_mock):
+    route = respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(
+            200,
+            json=alerts_response(
+                sys_alert("SUSPENSION", 9, ["Orange"], "Orange suspended."),
+                sys_alert("DELAY", 5, ["Red", "Green-B"], "Delays."),
+                sys_alert("DELAY", 3, ["Green-C"], "More Green delays."),  # Green already set
+                sys_alert("DELAY", 4, ["116"], "Bus delays."),  # not a tracked line -> ignored
+            ),
+        )
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        affected = await AlertsService(client).get_system_alerts(now=NOW)
+
+    # Worst-first across lines; Green branches collapse to one line; bus route ignored.
+    assert [ls.label for ls in affected] == ["Orange Line", "Red Line", "Green Line"]
+    assert affected[0].alert.effect == "SUSPENSION"
+    # One call, filtered to rapid transit, requesting informed_entity.
+    params = route.calls.last.request.url.params
+    assert params["filter[route_type]"] == "0,1"
+    assert "informed_entity" in params["fields[alert]"]
+
+
+async def test_get_system_alerts_empty_when_all_normal(respx_mock):
+    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(200, json=alerts_response())
+    )
+    async with MBTAClient(base_url=MBTA_BASE_URL) as client:
+        affected = await AlertsService(client).get_system_alerts(now=NOW)
+    assert affected == ()
+
+
 # --- FacilitiesService ------------------------------------------------------
 
 

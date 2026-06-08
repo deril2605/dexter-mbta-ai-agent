@@ -133,10 +133,15 @@ class Disambiguation:
 
 @dataclass(frozen=True, slots=True)
 class PredictionResult:
-    """Real-time predictions: the next departures as relative minutes from now."""
+    """Real-time predictions: the next departures as relative minutes from now.
+
+    ``alert`` is the single most-relevant active alert on this route/stop, if any,
+    so the formatter can append a one-line heads-up. ``None`` when nothing is wrong.
+    """
 
     target: ResolvedTarget
     minutes_away: tuple[int, ...]
+    alert: Alert | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,13 +150,19 @@ class ScheduleResult:
 
     target: ResolvedTarget
     next_time: datetime
+    alert: Alert | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class NoServiceResult:
-    """No remaining real-time or scheduled service for this target today."""
+    """No remaining real-time or scheduled service for this target today.
+
+    ``alert`` lets the formatter explain *why* (e.g. service is suspended) instead
+    of the generic "no service around you" line, when an alert says so.
+    """
 
     target: ResolvedTarget
+    alert: Alert | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +191,7 @@ class Alert:
     effect: str
     severity: int = 0
     lifecycle: str = ""
+    routes: tuple[str, ...] = ()  # route ids from informed_entity (system-status grouping)
 
     @classmethod
     def from_jsonapi(cls, resource: dict[str, Any]) -> Alert:
@@ -189,11 +201,17 @@ class Alert:
             severity = int(attrs.get("severity"))
         except (TypeError, ValueError):
             severity = 0
+        routes = []
+        for entity in attrs.get("informed_entity") or []:
+            route_id = entity.get("route")
+            if route_id and route_id not in routes:
+                routes.append(route_id)
         return cls(
             header=header.strip(),
             effect=(attrs.get("effect") or "").strip(),
             severity=severity,
             lifecycle=(attrs.get("lifecycle") or "").strip(),
+            routes=tuple(routes),
         )
 
 
@@ -211,3 +229,26 @@ class FacilitiesResult:
 
     scope_label: str
     outages: tuple[Alert, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class LineStatus:
+    """One affected line in a system-wide status summary.
+
+    ``label`` is a speakable line name ("Red Line", "Green Line"); ``alert`` is the
+    worst active alert on it. The formatter maps ``alert.effect`` to plain language.
+    """
+
+    label: str
+    alert: Alert
+
+
+@dataclass(frozen=True, slots=True)
+class SystemStatusResult:
+    """A cross-line "how's the T right now?" summary.
+
+    ``affected`` lists only the lines with an active disruption, worst-first; any
+    line not listed is running normally. Empty ``affected`` => whole system normal.
+    """
+
+    affected: tuple[LineStatus, ...] = ()

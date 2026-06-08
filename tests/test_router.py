@@ -72,6 +72,13 @@ async def test_classifies_alerts():
     assert slots.route == "Blue Line"
 
 
+async def test_classifies_service_status():
+    client, _ = make_client({"intent": "service_status"})
+    slots = await Router(client, "gpt-4.1-mini").route("how's the T right now?")
+    assert slots.intent == "service_status"  # accepted, not degraded to unknown
+    assert slots.route is None
+
+
 async def test_classifies_facilities():
     client, _ = make_client({"intent": "facilities", "location": "Park Street"})
     slots = await Router(client, "gpt-5-mini").route("is the elevator at Park Street working?")
