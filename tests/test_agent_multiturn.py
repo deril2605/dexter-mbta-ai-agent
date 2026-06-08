@@ -58,6 +58,12 @@ def build(respx_mock, router: FakeRouter):
     respx_mock.get(f"{MBTA_BASE_URL}/routes").mock(
         return_value=httpx.Response(200, json=ROUTES_PAYLOAD)
     )
+    # Predictions now weave in a service heads-up, so they make an extra /alerts call.
+    # Default it to "no alerts"; a test that wants a real alert re-mocks /alerts AFTER
+    # build() (same respx route -> the later .mock() wins).
+    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
     client = MBTAClient(base_url=MBTA_BASE_URL)
     resolver = Resolver(client, RouteCache(client))
     departures = DeparturesService(client)
@@ -194,6 +200,9 @@ async def test_fresh_query_escapes_a_pending_clarification(respx_mock):
 
 
 async def test_alerts_intent_returns_alerts(respx_mock):
+    router = FakeRouter({"is the Blue Line down?": RouterSlots(intent="alerts", route="Blue Line")})
+    graph, client = build(respx_mock, router)
+    # Re-mock /alerts after build() so this content wins over build()'s empty default.
     respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
         return_value=httpx.Response(
             200,
@@ -213,8 +222,6 @@ async def test_alerts_intent_returns_alerts(respx_mock):
             },
         )
     )
-    router = FakeRouter({"is the Blue Line down?": RouterSlots(intent="alerts", route="Blue Line")})
-    graph, client = build(respx_mock, router)
     turn = await graph.ainvoke({"message": "is the Blue Line down?"}, config("s3"))
     assert "Blue Line delays of about 10 minutes." in turn["reply"]
     assert turn["needs_input"] is False
@@ -289,9 +296,6 @@ async def test_router_receives_prior_turns_as_history(respx_mock):
 
 
 async def test_new_question_escapes_stale_clarification(respx_mock):
-    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
-        return_value=httpx.Response(200, json=one_alert("DELAY", 5, "Blue Line minor delays."))
-    )
     router = FakeRouter(
         {
             # No stop -> predictions leaves a "which stop?" clarification pending.
@@ -301,6 +305,9 @@ async def test_new_question_escapes_stale_clarification(respx_mock):
         }
     )
     graph, client = build(respx_mock, router)
+    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(200, json=one_alert("DELAY", 5, "Blue Line minor delays."))
+    )
 
     turn1 = await graph.ainvoke({"message": "next blue line"}, config("esc2"))
     assert isinstance(turn1["result"], Disambiguation)  # "Which stop did you mean?"
@@ -329,9 +336,6 @@ def one_alert(effect: str, severity: int, header: str) -> dict:
 
 
 async def test_alerts_clarifies_missing_route_across_turns(respx_mock):
-    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
-        return_value=httpx.Response(200, json=one_alert("DELAY", 5, "Blue Line minor delays."))
-    )
     router = FakeRouter(
         {
             "any alerts?": RouterSlots(intent="alerts"),
@@ -339,6 +343,9 @@ async def test_alerts_clarifies_missing_route_across_turns(respx_mock):
         }
     )
     graph, client = build(respx_mock, router)
+    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(200, json=one_alert("DELAY", 5, "Blue Line minor delays."))
+    )
 
     turn1 = await graph.ainvoke({"message": "any alerts?"}, config("al"))
     assert turn1["needs_input"] is True
@@ -355,11 +362,6 @@ async def test_facilities_clarifies_missing_scope_across_turns(respx_mock):
     respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(
         return_value=httpx.Response(200, json=stops_payload(("place-pktrm", "Park Street")))
     )
-    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
-        return_value=httpx.Response(
-            200, json=one_alert("ELEVATOR_CLOSURE", 7, "Park Street elevator unavailable.")
-        )
-    )
     router = FakeRouter(
         {
             "are the elevators working?": RouterSlots(intent="facilities"),
@@ -367,6 +369,11 @@ async def test_facilities_clarifies_missing_scope_across_turns(respx_mock):
         }
     )
     graph, client = build(respx_mock, router)
+    respx_mock.get(f"{MBTA_BASE_URL}/alerts").mock(
+        return_value=httpx.Response(
+            200, json=one_alert("ELEVATOR_CLOSURE", 7, "Park Street elevator unavailable.")
+        )
+    )
 
     turn1 = await graph.ainvoke({"message": "are the elevators working?"}, config("fac"))
     assert turn1["needs_input"] is True

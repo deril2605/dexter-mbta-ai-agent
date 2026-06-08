@@ -332,6 +332,40 @@ because greeting / thanks / sign-off all collapsed to the same sentence.
 
 ---
 
+## Shipping mode: the "service-aware" bundle (v1.1)
+
+Pivoted from the hardening backlog (CI/perf) to rider-facing features, prioritized against
+real demand: MBTA's own MBTA Go feedback says ~half of requests are for *more features*
+(approaching-vehicle detail, live crowding, a Waze-style trip planner). Shipped the two
+cheapest high-impact wins first — both reuse the existing `AlertsService`.
+
+- **Service-aware predictions (B).** Every "next X" answer now carries a one-line heads-up if
+  the route/stop has an active alert ("…then 9 minutes. Heads up — there are delays."). The
+  alert is fetched **concurrently with departures** via `asyncio.gather`, so it adds no
+  latency, and an alerts failure is swallowed (`_safe_alerts`) — a missing heads-up must never
+  sink the real answer. Added an optional `alert` field to `PredictionResult`/`ScheduleResult`/
+  `NoServiceResult` (frozen dataclass default → backward-compatible).
+- **System status (A).** New `service_status` intent + node: one
+  `/alerts?filter[route_type]=0,1` call, alerts grouped into canonical lines by parsing
+  `informed_entity[].route` (Green-* collapse to "Green Line"). "How's the T right now?" →
+  "The Green Line has a station closed and the Orange Line has a station issue; everything
+  else is running normally." Lines not mentioned read as normal.
+
+Lessons:
+- **Sparse fieldsets bite silently.** `fields[alert]` omitted `informed_entity`, so grouping
+  saw zero routes until I added a dedicated `_SYSTEM_ALERT_FIELDS`. If you sparse-fieldset a
+  JSON:API call, every field you later parse must be in the list.
+- **A new intent reshapes existing boundaries.** Adding `service_status` made a bare follow-up
+  ("is it running?" after a Red Line turn) drift from `alerts` → `service_status`. The router
+  eval caught it (95%/100%); fixed by teaching the prompt that a route *carried from context*
+  keeps it in `alerts`. The eval set is the safety net for prompt changes — add cases for the
+  new boundary, not just the new feature.
+- **respx routes are keyed by URL pattern.** Two `.get(".../alerts")` calls reconfigure the
+  *same* route (last `.mock()` wins), so an empty default in a shared `build()` helper must be
+  registered *before* a test's specific mock — reorder, don't duplicate.
+
+---
+
 ## TL;DR — lessons worth carrying forward
 
 - **Measure before optimizing.** Tracing turned a "latency vibe" into "the LLM is 98% of
