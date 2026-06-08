@@ -23,7 +23,7 @@ from dexter.mbta.models import (
     StopNotOnRoute,
 )
 
-from .state import AgentState, ServiceError, SkillUnavailable
+from .state import AgentState, ServiceError, SkillUnavailable, SmallTalk
 
 _VEHICLE_PLURAL = {0: "trains", 1: "trains", 2: "trains", 3: "buses", 4: "ferries"}
 
@@ -69,6 +69,8 @@ def format_outcome(outcome) -> str:
             return _format_skill_unavailable(outcome)
         case ServiceError():
             return _format_service_error(outcome)
+        case SmallTalk():
+            return outcome.text  # already a complete, model-written reply
         case _:
             return _format_fallback()
 

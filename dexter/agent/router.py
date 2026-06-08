@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-INTENTS = ("predictions", "alerts", "facilities", "unknown")
+INTENTS = ("predictions", "alerts", "facilities", "smalltalk", "unknown")
 TOOL_NAME = "extract_transit_query"
 
 SYSTEM_PROMPT = """You are the intent router for Dexter, an MBTA (Boston) transit assistant.
@@ -36,7 +36,11 @@ intent:
 (e.g. "when's the next 116 from Bennington Street toward Maverick").
 - "alerts": service alerts, delays, disruptions ("is the Blue Line down?").
 - "facilities": elevators or escalators ("is the elevator at Park St working?").
-- "unknown": anything not about MBTA transit.
+- "smalltalk": social conversation, not a request for transit info — greetings ("hi"), \
+thanks ("thank you"), acknowledgements or sign-offs ("no that's enough", "that's all", \
+"ok cool", "bye"). Prefer this over "unknown" for anything conversational.
+- "unknown": an actual question or request that isn't about MBTA transit \
+("what's the weather?", "tell me a joke").
 
 slots (leave a slot out when it isn't present, unless it carries over from context above):
 - route: the route the user means — as they said it ("116", "Blue Line", "Green Line B"), or \
@@ -73,6 +77,17 @@ _TOOL = {
         },
     },
 }
+
+
+SMALLTALK_PROMPT = """You are Dexter, a warm and concise assistant for the MBTA (Boston) transit \
+system. The user said something conversational — a greeting, thanks, or a sign-off — not a transit \
+question. Reply in ONE short, friendly, natural sentence:
+- If they greeted you, greet them back and invite them to ask about the next bus or train.
+- If they thanked you or are wrapping up, acknowledge warmly and let them know you're around.
+Never state arrival times, schedules, routes, or any other transit facts. Plain text, no emojis."""
+
+# Used only if the smalltalk model call fails — never leave a social turn unanswered.
+DEFAULT_SMALLTALK = "Hi! Ask me when the next bus or train is coming."
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +131,30 @@ class Router:
             max_completion_tokens=self._max_completion_tokens,
         )
         return _parse_response(response)
+
+    async def smalltalk(self, message: str, *, history: list[dict] | None = None) -> str:
+        """Generate a brief, natural reply to a social (non-transit) message.
+
+        Safe to let the model write freely here: the prompt forbids transit facts,
+        and this is only invoked for the ``smalltalk`` intent — all real departure
+        info still comes from templates, never the LLM.
+        """
+        messages: list[dict] = [{"role": "system", "content": SMALLTALK_PROMPT}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": message})
+
+        response = await self._client.chat.completions.create(
+            model=self._deployment,
+            messages=messages,
+            temperature=0.6,  # a little warmth/variety; no facts at stake
+            max_completion_tokens=60,
+        )
+        try:
+            text = (response.choices[0].message.content or "").strip()
+        except (AttributeError, IndexError, TypeError):
+            return DEFAULT_SMALLTALK
+        return text or DEFAULT_SMALLTALK
 
 
 def _parse_response(response) -> RouterSlots:

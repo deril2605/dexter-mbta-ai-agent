@@ -13,11 +13,58 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from dexter.mbta._timeutils import MBTA_TZ
+
 logger = logging.getLogger("dexter.service")
+
+# When this process started — a good proxy for "last deployed" since the warm
+# replica restarts on each new revision. Used unless DEXTER_DEPLOYED_AT overrides it.
+_STARTED_AT = datetime.now(UTC)
+
+
+def _format_et(raw: str | datetime | None) -> str:
+    """Render a UTC timestamp as a readable US/Eastern string for the UI footer.
+
+    Accepts an ISO-8601 string (e.g. DEXTER_DEPLOYED_AT) or a datetime; returns ""
+    when missing/unparseable so the client shows 'unavailable'.
+    """
+    if raw is None:
+        return ""
+    when = raw
+    if isinstance(when, str):
+        try:
+            when = datetime.fromisoformat(when)
+        except ValueError:
+            return ""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return when.astimezone(MBTA_TZ).strftime("%b %d, %Y · %I:%M %p ET")
+
+
+# Static terminal UI lives in web/ (sibling to dexter/), kept fully separate from
+# the app layers and served only when dexter_serve_web is on. Resolve it against
+# the working directory first (the container copies web/ next to the run dir, and
+# local runs start from the repo root) and fall back to the source-relative path
+# (covers editable installs and tests). First existing file wins.
+def _find_web_index() -> Path:
+    candidates = (
+        Path.cwd() / "web" / "index.html",
+        Path(__file__).resolve().parents[2] / "web" / "index.html",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    return candidates[0]  # nonexistent; the route returns 404
+
+
+_WEB_INDEX = _find_web_index()
 
 
 class ChatRequest(BaseModel):
@@ -68,6 +115,14 @@ async def _build_runtime(app: FastAPI) -> None:
     app.state.mbta_client = mbta
     app.state.azure_client = azure
     app.state.owns_clients = True
+    # Beta web client + gate, sourced from config here (lifespan) so importing this
+    # module never forces Settings validation. Tests inject a graph and skip this,
+    # leaving the defaults set in create_app (gate off, web off).
+    app.state.passcode = settings.dexter_passcode
+    # Prefer an explicit deploy time from the deploy script; fall back to when this
+    # process started. Formatted to Eastern here so the static client stays dumb.
+    app.state.deployed_at = _format_et(settings.dexter_deployed_at) or _format_et(_STARTED_AT)
+    app.state.serve_web = settings.dexter_serve_web
 
 
 @asynccontextmanager
@@ -86,14 +141,33 @@ def create_app(*, graph=None) -> FastAPI:
     app = FastAPI(title="Dexter", version="0.1.0", lifespan=lifespan)
     app.state.graph = graph
     app.state.owns_clients = False
+    # Safe defaults; _build_runtime overrides these from config when the service
+    # owns its dependencies. Tests that inject a graph keep the gate/web off.
+    app.state.passcode = None
+    app.state.deployed_at = _format_et(_STARTED_AT)
+    app.state.serve_web = False
 
     @app.get("/health")
     async def health() -> dict:
-        return {"status": "ok"}
+        return {"status": "ok", "deployed_at": app.state.deployed_at}
+
+    @app.get("/")
+    async def index() -> FileResponse:
+        # Dumb static client (the CLI's twin); only present when explicitly enabled.
+        if not app.state.serve_web or not _WEB_INDEX.is_file():
+            raise HTTPException(status_code=404)
+        return FileResponse(_WEB_INDEX)
 
     @app.post("/chat", response_model=ChatResponse)
-    async def chat(request: ChatRequest) -> ChatResponse:
+    async def chat(
+        request: ChatRequest,
+        x_dexter_passcode: str | None = Header(default=None),
+    ) -> ChatResponse:
         from dexter.observability import session
+
+        # Gate before any graph/LLM work so a leaked link can't spend Azure quota.
+        if app.state.passcode and x_dexter_passcode != app.state.passcode:
+            raise HTTPException(status_code=401, detail="Invalid or missing passcode.")
 
         config = {"configurable": {"thread_id": request.session_id}}
         try:

@@ -46,9 +46,19 @@ class Settings(BaseSettings):
     dexter_port: int = 8000
     log_level: str = "INFO"
 
+    # --- Beta web client (optional, off by default) ---
+    # When ``dexter_serve_web`` is on, the brain serves the static terminal UI
+    # (``web/index.html``) at ``GET /``. ``dexter_passcode`` gates ``/chat``: when
+    # set, requests must carry a matching ``X-Dexter-Passcode`` header. Both are
+    # off/unset by default so the Phase 1 app and tests are unaffected.
+    dexter_serve_web: bool = False
+    dexter_passcode: str | None = None
+    dexter_deployed_at: str | None = None
+
     # --- Observability (optional, off by default) ---
     dexter_tracing: bool = False
     dexter_tracing_endpoint: str | None = None  # Phoenix OTLP endpoint; None = default
+    dexter_tracing_api_key: str | None = None  # Phoenix Cloud OTLP auth; None = local/none
 
 
 @lru_cache

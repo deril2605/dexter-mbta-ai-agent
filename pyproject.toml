@@ -26,13 +26,27 @@ dev = [
     "ruff>=0.6",
     "opentelemetry-sdk>=1.20",  # InMemorySpanExporter for tracing tests
 ]
-# Optional local tracing via Arize Phoenix (OpenInference / OpenTelemetry).
-# Heavy; install explicitly: `uv sync --extra tracing`.
+# Tracing client (OpenInference / OpenTelemetry → Phoenix Cloud or a remote
+# collector). Slim enough to ship in the deployed container: the OTLP exporter
+# and instrumentations only, no Phoenix server. Install: `uv sync --extra tracing`.
 tracing = [
-    "arize-phoenix>=4.0",
     "arize-phoenix-otel>=0.6",
     "openinference-instrumentation-langchain>=0.1",
     "openinference-instrumentation-openai>=0.1",
+]
+# Local trace viewer (the full Phoenix server UI at localhost:6006). Heavy and
+# only needed for local debugging: `uv sync --extra tracing-local`.
+tracing-local = [
+    "dexter[tracing]",
+    "arize-phoenix>=4.0",
+]
+deploy = [
+    "azure-core>=1.30",
+    "azure-identity>=1.17",
+    "azure-mgmt-appcontainers>=3.2",
+    "azure-mgmt-authorization>=4.0",
+    "azure-mgmt-containerregistry>=13.0",
+    "azure-mgmt-resource>=23.1",
 ]
 
 [build-system]

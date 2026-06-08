@@ -275,6 +275,63 @@ Three compounding causes and fixes (the matcher is `rapidfuzz`, not regex; the i
 
 ---
 
+## Phase 1.5 — Beta web client + Azure Container Apps deployment (2026-06-07)
+
+Goal: let a friend beta-test over a shareable link — no repo clone, no scripts — while
+keeping the option to tear it all out trivially.
+
+- **The web UI is the CLI's twin, not a new layer.** Because `cli/repl.py` was already a
+  dumb client that only POSTs `/chat`, a browser client adds *zero* code to brain/agent/mbta.
+  A single static `web/index.html` (terminal-styled, client-side typewriter, no framework,
+  no `xterm.js`) talks to the same endpoint. Honors "no logic in the client" for free.
+- **Decoupling = folders + a default-off flag, not a separate repo.** Pushed back on a
+  second repository: it buys no isolation but adds `/chat` contract drift and two pipelines.
+  Instead `web/` and `deploy/` are sibling folders; `dexter/` imports neither. Removal is
+  `rm -rf web/ deploy/` + `DEXTER_SERVE_WEB=false` → exactly Phase 1 again.
+- **Gate before the LLM.** The passcode check (`X-Dexter-Passcode`) sits at the top of
+  `/chat`, before any graph/Azure call, so a leaked link can't burn quota. The gate only
+  *appears* in the UI on a real 401 — ungated/local runs never prompt.
+- **Lazy-config discipline held.** Web/gate state lives on `app.state`, defaulted in
+  `create_app` and set from `Settings` only in `_build_runtime` (lifespan). Importing the
+  module still triggers no validation, so the 150-test suite stays offline and green.
+- **Tracing is server-side — the friend's browser emits nothing.** Spans come from the
+  brain, so remote testers' sessions land wherever the brain points. Local Phoenix is
+  in-memory/ephemeral and unreachable from a cloud brain, so beta history goes to **Phoenix
+  Cloud** via OTLP + an `api_key` header. Split the `tracing` extra into a slim client
+  (`arize-phoenix-otel` only, shipped in the image) vs `tracing-local` (full server).
+- **Container gotcha:** `pip install .` relocates `dexter/` into site-packages, so a
+  source-relative path to `web/` breaks in the image. Resolve the static file CWD-first,
+  source-relative as fallback — works for the container (WORKDIR `/app`), editable installs,
+  and tests alike.
+- **ACA setting that matters:** `--min-replicas 1`. Scale-to-zero would put a cold start +
+  route-cache re-warm in front of the already-slow router LLM on the first message. Budget's
+  not the constraint; a warm replica is.
+
+---
+
+## Phase 1.5 — Conversational smalltalk, the right way (2026-06-08)
+
+Beta feedback: a greeting ("hi") got a canned line ("Anytime — just ask…"), which read
+like a robot. First attempt template-matched smalltalk to one fixed string — still wrong,
+because greeting / thanks / sign-off all collapsed to the same sentence.
+
+- **Let the model write social replies; keep facts templated.** Added a `smalltalk`
+  intent and a dedicated `Router.smalltalk()` LLM call that writes one short, natural,
+  contextual sentence (greeting greets back, thanks gets "you're welcome"). The reply is
+  carried as a `SmallTalk(text=...)` outcome and rendered verbatim.
+- **This is not a violation of "the LLM never produces user text."** That invariant exists
+  to prevent **fabricated times/transit facts**. The smalltalk prompt forbids any transit
+  specifics, and the node only runs for the `smalltalk` intent — real departures still come
+  from templates. A misclassified transit question fails safe (a friendly "what route?",
+  never an invented time).
+- **Cost is a second LLM call, but only on social turns** (rare), so latency on the hot
+  predictions path is unchanged. Used temperature 0.6 here for warmth/variety vs the
+  router's 0.0 deterministic extraction.
+- **Lesson:** "LLM-free for facts" ≠ "LLM-free for everything." Draw the safety boundary
+  around the thing that can actually be wrong (times), and let the model be human elsewhere.
+
+---
+
 ## TL;DR — lessons worth carrying forward
 
 - **Measure before optimizing.** Tracing turned a "latency vibe" into "the LLM is 98% of
