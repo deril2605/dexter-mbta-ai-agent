@@ -36,3 +36,8 @@
 {"utterance": "are there any delays anywhere?", "expected": {"intent": "service_status"}}
 {"utterance": "is everything running ok on the subway?", "expected": {"intent": "service_status"}}
 {"utterance": "is the Orange Line delayed?", "expected": {"intent": "alerts", "route": "Orange Line"}}
+{"utterance": "save the 116 from Bennington Street toward Maverick as my morning commute, 5 minute walk", "expected": {"intent": "save_commute", "route": "116", "location": "Bennington Street", "direction_hint": "Maverick", "commute_name": "morning", "walk_minutes": 5}}
+{"utterance": "remember this as my work commute", "history": [{"role": "user", "content": "next red line from Park Street toward Alewife"}, {"role": "assistant", "content": "The next Red Line toward Alewife is in 4 minutes, then 11 minutes."}], "expected": {"intent": "save_commute", "commute_name": "work"}}
+{"utterance": "should I leave now for my morning commute?", "expected": {"intent": "leave_now", "commute_name": "morning"}}
+{"utterance": "when should I leave for work?", "expected": {"intent": "leave_now", "commute_name": "work"}}
+{"utterance": "do I have time before my next train?", "expected": {"intent": "leave_now"}}

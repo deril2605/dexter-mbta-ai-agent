@@ -7,7 +7,7 @@ human-readable names, relative minutes, and clock times.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from dexter.mbta._timeutils import MBTA_TZ
 from dexter.mbta.models import (
@@ -24,7 +24,16 @@ from dexter.mbta.models import (
     SystemStatusResult,
 )
 
-from .state import AgentState, ServiceError, SkillUnavailable, SmallTalk
+from .state import (
+    AgentState,
+    LeaveNow,
+    NoSavedCommute,
+    SavedCommuteConfirmation,
+    SaveNeedsTrip,
+    ServiceError,
+    SkillUnavailable,
+    SmallTalk,
+)
 
 _VEHICLE_PLURAL = {0: "trains", 1: "trains", 2: "trains", 3: "buses", 4: "ferries"}
 
@@ -66,6 +75,14 @@ def format_outcome(outcome) -> str:
             return _format_system_status(outcome)
         case FacilitiesResult():
             return _format_facilities(outcome)
+        case SavedCommuteConfirmation():
+            return _format_saved_commute(outcome)
+        case LeaveNow():
+            return _format_leave_now(outcome)
+        case NoSavedCommute():
+            return _format_no_saved_commute(outcome)
+        case SaveNeedsTrip():
+            return _format_save_needs_trip()
         case Disambiguation():
             return _format_disambiguation(outcome)
         case SkillUnavailable():
@@ -137,6 +154,79 @@ def _format_no_service(result: NoServiceResult) -> str:
 def _clock(when: datetime) -> str:
     local = when.astimezone(MBTA_TZ)
     return local.strftime("%I:%M %p").lstrip("0")
+
+
+# --- saved commutes ("leave now", save confirmation) ------------------------
+
+
+def _format_saved_commute(outcome: SavedCommuteConfirmation) -> str:
+    trip = f"the {outcome.route_name} from {_speakable(outcome.stop_name)}"
+    if outcome.direction_destination:
+        trip += f" toward {outcome.direction_destination}"
+    walk = f", a {outcome.walk_minutes}-minute walk" if outcome.walk_minutes else ""
+    return f"Saved your {outcome.name} commute: {trip}{walk}. Ask me when to leave anytime."
+
+
+def _format_leave_now(outcome: LeaveNow) -> str:
+    dep = outcome.departures
+    walk = outcome.walk_minutes
+    if isinstance(dep, PredictionResult):
+        return _leave_now_from_predictions(dep, walk)
+    if isinstance(dep, ScheduleResult):
+        descriptor = _target_descriptor(dep.target)
+        leave_by = dep.next_time - timedelta(minutes=walk)
+        sentence = (
+            f"Real-time data isn't available, but the next {descriptor} is scheduled for "
+            f"{_clock(dep.next_time)} — plan to leave by about {_clock(leave_by)}."
+        )
+        return _with_heads_up(sentence, dep.alert)
+    return _format_no_service(dep)  # NoServiceResult already phrases + adds any heads-up
+
+
+def _leave_now_from_predictions(result: PredictionResult, walk: int) -> str:
+    descriptor = _target_descriptor(result.target)
+    minutes = result.minutes_away
+    # Only departures you can still physically reach (≥ your walk time) are catchable.
+    catch = [m for m in minutes if m >= walk]
+    if not catch:
+        if minutes:
+            sentence = (
+                f"The next {descriptor} is {_relative_lead(minutes[0])} — sooner than your "
+                f"{walk}-minute walk, so you'd likely miss it."
+            )
+        else:
+            sentence = f"I don't see an upcoming {descriptor} right now."
+        return _with_heads_up(sentence, result.alert)
+
+    leads = [m - walk for m in catch]
+    first = "Leave now" if leads[0] <= 0 else f"Leave in {_plain_minutes(leads[0])}"
+    sentence = f"{first} to catch the {descriptor}"
+    if len(leads) > 1:
+        sentence += f", or in {_plain_minutes(leads[1])} for the one after"
+    return _with_heads_up(sentence + ".", result.alert)
+
+
+def _plain_minutes(n: int) -> str:
+    return "1 minute" if n == 1 else f"{n} minutes"
+
+
+def _format_no_saved_commute(outcome: NoSavedCommute) -> str:
+    example = (
+        "save the 116 from Bennington Street toward Maverick as my morning commute, a 5-minute walk"
+    )
+    if outcome.name:
+        return (
+            f"I don't have a commute saved as '{outcome.name}' yet. You can save one — "
+            f"for example: '{example}.'"
+        )
+    return f"You haven't saved a commute yet. Try: '{example}' — then ask me when to leave."
+
+
+def _format_save_needs_trip() -> str:
+    return (
+        "Tell me the trip first — like 'next 116 from Bennington Street toward Maverick' — "
+        "then say 'save that as my morning commute.'"
+    )
 
 
 # --- stop not on this route -------------------------------------------------

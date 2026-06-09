@@ -24,6 +24,7 @@ from dexter.mbta.models import (
     FacilitiesResult,
     NoServiceResult,
     PredictionResult,
+    ResolvedTarget,
     ScheduleResult,
     StopNotOnRoute,
     SystemStatusResult,
@@ -31,9 +32,22 @@ from dexter.mbta.models import (
 from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver, match_disambiguation_option
 from dexter.mbta.stations import StationCache
+from dexter.profiles import CommuteStore, SavedCommute
 
 from .router import DEFAULT_SMALLTALK, Router
-from .state import AgentState, Fallback, ServiceError, SmallTalk
+from .state import (
+    AgentState,
+    Fallback,
+    LeaveNow,
+    NoSavedCommute,
+    SavedCommuteConfirmation,
+    SaveNeedsTrip,
+    ServiceError,
+    SmallTalk,
+)
+
+# Default name used when a rider saves or asks about "my commute" without a label.
+_DEFAULT_COMMUTE_NAME = "default"
 
 
 async def router_node(state: AgentState, *, router: Router) -> dict:
@@ -46,6 +60,8 @@ async def router_node(state: AgentState, *, router: Router) -> dict:
         "direction_hint": slots.direction_hint,
         "follow_up": slots.follow_up,
         "offset": slots.offset,
+        "commute_name": slots.commute_name,
+        "walk_minutes": slots.walk_minutes,
         "result": None,
         "reply": "",
         "needs_input": False,
@@ -236,6 +252,87 @@ async def service_status_node(
     except (MBTAUnavailableError, MBTAError):
         return {"result": ServiceError(kind="unavailable"), "needs_input": False}
     return {"result": SystemStatusResult(affected=affected), "needs_input": False}
+
+
+async def save_commute_node(
+    state: AgentState,
+    *,
+    resolver: Resolver,
+    store: CommuteStore,
+    now: datetime | None = None,
+) -> dict:
+    """Save a named commute for the rider (an opaque ``user_id``).
+
+    Resolves the trip from fresh slots, or reuses the last looked-up target when the
+    rider says "save that". Stores a :class:`SavedCommute` keyed by (user_id, name).
+    """
+    user_id = state.get("user_id") or "local"
+    name = _normalize_name(state.get("commute_name")) or _DEFAULT_COMMUTE_NAME
+    walk = state.get("walk_minutes") or 0
+
+    target: ResolvedTarget | None = None
+    try:
+        if state.get("route"):
+            resolved = await resolver.resolve(
+                state.get("route"), state.get("location"), state.get("direction_hint")
+            )
+            if isinstance(resolved, ResolvedTarget):
+                target = resolved
+            else:
+                # Ambiguous / not-on-route: don't half-save; ask for a concrete trip.
+                return {"result": SaveNeedsTrip(), "needs_input": False}
+        elif state.get("last_target") is not None:
+            target = state["last_target"]  # "save that" -> reuse the last answer's target
+    except MBTARateLimitError:
+        return {"result": ServiceError(kind="busy"), "needs_input": False}
+    except (MBTAUnavailableError, MBTAError):
+        return {"result": ServiceError(kind="unavailable"), "needs_input": False}
+
+    if target is None:
+        return {"result": SaveNeedsTrip(), "needs_input": False}
+
+    await store.save(_commute_from_target(user_id, name, target, walk))
+    return {
+        "result": SavedCommuteConfirmation(
+            name=name,
+            route_name=target.route_name,
+            stop_name=target.stop_name,
+            direction_destination=target.direction_destination,
+            walk_minutes=walk,
+        ),
+        "last_target": target,
+        "needs_input": False,
+    }
+
+
+async def leave_now_node(
+    state: AgentState,
+    *,
+    store: CommuteStore,
+    departures: DeparturesService,
+    alerts: AlertsService | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """ "Should I leave now?" for a saved commute: departures minus the walk time."""
+    user_id = state.get("user_id") or "local"
+    name = _normalize_name(state.get("commute_name"))
+    commute = await _load_commute(store, user_id, name)
+    if commute is None:
+        return {"result": NoSavedCommute(name=name), "needs_input": False}
+
+    target = _target_from_commute(commute)
+    try:
+        dep = await _departures_with_alert(target, departures, alerts, now)
+    except MBTARateLimitError:
+        return {"result": ServiceError(kind="busy"), "needs_input": False}
+    except (MBTAUnavailableError, MBTAError):
+        return {"result": ServiceError(kind="unavailable"), "needs_input": False}
+
+    return {
+        "result": LeaveNow(name=commute.name, walk_minutes=commute.walk_minutes, departures=dep),
+        "last_target": target,
+        "needs_input": False,
+    }
 
 
 async def smalltalk_node(state: AgentState, *, router: Router) -> dict:
@@ -459,3 +556,55 @@ async def _safe_alerts(alerts: AlertsService, target, now: datetime | None):
         return await alerts.get_alerts(route_id=target.route_id, stop_ids=target.stop_ids, now=now)
     except (MBTARateLimitError, MBTAUnavailableError, MBTAError):
         return ()
+
+
+# --- saved commutes ---------------------------------------------------------
+
+
+def _normalize_name(name: str | None) -> str | None:
+    """Canonicalize a commute label for storage/lookup ('Morning ' -> 'morning')."""
+    if not name:
+        return None
+    cleaned = name.strip().lower()
+    return cleaned or None
+
+
+def _commute_from_target(
+    user_id: str, name: str, target: ResolvedTarget, walk_minutes: int
+) -> SavedCommute:
+    """Map a resolved (route, stop, direction) into a persistable commute."""
+    return SavedCommute(
+        user_id=user_id,
+        name=name,
+        route_id=target.route_id,
+        route_name=target.route_name,
+        stop_ids=tuple(target.stop_ids),
+        stop_name=target.stop_name,
+        direction_id=target.direction_id,
+        direction_destination=target.direction_destination,
+        route_type=target.route_type,
+        walk_minutes=walk_minutes,
+    )
+
+
+def _target_from_commute(commute: SavedCommute) -> ResolvedTarget:
+    """Rebuild a :class:`ResolvedTarget` from a saved commute (for departures)."""
+    return ResolvedTarget(
+        route_id=commute.route_id,
+        route_name=commute.route_name,
+        stop_ids=tuple(commute.stop_ids),
+        stop_name=commute.stop_name,
+        direction_id=commute.direction_id,
+        direction_destination=commute.direction_destination,
+        route_type=commute.route_type,
+    )
+
+
+async def _load_commute(store: CommuteStore, user_id: str, name: str | None) -> SavedCommute | None:
+    """Find the commute the rider means: the named one, else the sole one, else default."""
+    if name:
+        return await store.get(user_id, name)
+    saved = await store.list(user_id)
+    if len(saved) == 1:
+        return saved[0]  # only one saved -> unambiguous
+    return await store.get(user_id, _DEFAULT_COMMUTE_NAME)

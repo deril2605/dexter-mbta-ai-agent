@@ -91,6 +91,7 @@ async def _build_runtime(app: FastAPI) -> None:
     from dexter.mbta.resolution import Resolver
     from dexter.mbta.routes import RouteCache
     from dexter.observability import configure_tracing
+    from dexter.profiles import CommuteStore
 
     settings = get_settings()
     logging.basicConfig(level=settings.log_level.upper())
@@ -111,7 +112,13 @@ async def _build_runtime(app: FastAPI) -> None:
     resolver = Resolver(mbta, route_cache)
     departures = DeparturesService(mbta)
 
-    app.state.graph = build_graph(router=router, resolver=resolver, departures=departures)
+    store = CommuteStore(settings.dexter_db_path)
+    await store.init()  # create the saved_commute table if needed
+    logger.info("commute store ready at %s", settings.dexter_db_path)
+
+    app.state.graph = build_graph(
+        router=router, resolver=resolver, departures=departures, store=store
+    )
     app.state.mbta_client = mbta
     app.state.azure_client = azure
     app.state.owns_clients = True
@@ -162,6 +169,7 @@ def create_app(*, graph=None) -> FastAPI:
     async def chat(
         request: ChatRequest,
         x_dexter_passcode: str | None = Header(default=None),
+        x_dexter_user: str | None = Header(default=None),
     ) -> ChatResponse:
         from dexter.observability import session
 
@@ -169,10 +177,13 @@ def create_app(*, graph=None) -> FastAPI:
         if app.state.passcode and x_dexter_passcode != app.state.passcode:
             raise HTTPException(status_code=401, detail="Invalid or missing passcode.")
 
+        # Opaque per-rider token (saved commutes); separate from the passcode gate.
         config = {"configurable": {"thread_id": request.session_id}}
         try:
             with session(request.session_id):  # groups this turn's spans by conversation
-                state = await app.state.graph.ainvoke({"message": request.message}, config)
+                state = await app.state.graph.ainvoke(
+                    {"message": request.message, "user_id": x_dexter_user}, config
+                )
         except Exception:  # noqa: BLE001 - never leak a stack trace to the client
             logger.exception("chat turn failed for session %s", request.session_id)
             return ChatResponse(

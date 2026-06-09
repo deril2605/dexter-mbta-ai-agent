@@ -392,6 +392,43 @@ Lessons:
 
 ---
 
+## Retention pivot: persistence, identity, and saved commutes (Wave 0/1)
+
+Reviewed a competing roadmap (from Codex) that reframed growth as a **commuter autopilot** —
+own personalized help for riders who take the same 1–3 trips/week, rather than competing on
+commodity arrivals. Adopted that *thesis*; rejected its *sequencing* (it buried the hard
+prerequisite). The real gate isn't features — it's that we had **no persistence and no user
+identity** (single-user, in-RAM `MemorySaver`, no DB). So Wave 0 built that substrate first.
+
+- **Identity = an opaque per-browser token.** The web client mints a UUID into `localStorage`
+  and sends it as `X-Dexter-User`; rows are keyed by it. No accounts, no PII, no login — and it
+  stays *separate* from the shared passcode (which remains the access gate). The CLI sends no
+  token and falls back to a `"local"` user, which is exactly the single-user model — so the
+  "no logic in the CLI" invariant holds.
+- **Persistence = stdlib `sqlite3` via `asyncio.to_thread`, not a new async-driver dep.** Commute
+  volume per user is tiny, so a fresh connection per call wrapped in a worker thread keeps the
+  public API `async` with zero new dependencies and nothing to add to the deploy container.
+- **A new layer, deps still pointing down.** `dexter/profiles/` is LLM-free and domain-free —
+  it imports nothing from the agent or MBTA core; the agent maps between its `ResolvedTarget`
+  and the flat `SavedCommute`. The MBTA library stays pure.
+- **"Leave now" keeps the LLM away from time, again.** The node fetches departures (reusing
+  `DeparturesService` + the v1.1 alert weave) and the *formatter* subtracts `walk_minutes` —
+  "leave in 2 to catch it, or in 10 for the one after." Only departures ≥ walk time are
+  catchable; a vehicle sooner than the walk reads as "you'd miss it."
+
+Lessons:
+- **The roadmap's missing prerequisite was the real first task.** Both roadmaps listed favorites/
+  leave-now as "features"; neither named persistence+identity, which gates all of them. When a
+  plan's Wave 1 assumes storage, scheduling, or auth that doesn't exist, that infra *is* Wave 0.
+- **Pick the boring datastore.** Stdlib SQLite + a thread offload beat adding `aiosqlite` for
+  this volume — fewer deps, same async surface, trivial to mount in the container.
+- **Saved state surfaces the checkpointer's msgpack warning** (LangGraph deserializing
+  unregistered result dataclasses). Pre-existing for all outcome types; the new ones join the
+  list. Still a warning, tracked in the hardening backlog — register types (or drop `result`
+  from the checkpoint) before LangGraph enforces it.
+
+---
+
 ## TL;DR — lessons worth carrying forward
 
 - **Measure before optimizing.** Tracing turned a "latency vibe" into "the LLM is 98% of

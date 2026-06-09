@@ -47,6 +47,43 @@ class SmallTalk:
 
 
 @dataclass(frozen=True, slots=True)
+class SavedCommuteConfirmation:
+    """Confirms a commute the rider just saved (so they can verify what stuck)."""
+
+    name: str
+    route_name: str
+    stop_name: str
+    direction_destination: str
+    walk_minutes: int
+
+
+@dataclass(frozen=True, slots=True)
+class LeaveNow:
+    """A "should I leave now?" answer for a saved commute.
+
+    ``departures`` is the underlying real-time/schedule/no-service result; the
+    formatter subtracts ``walk_minutes`` to phrase "leave in X" — the LLM never
+    computes the time.
+    """
+
+    name: str
+    walk_minutes: int
+    departures: PredictionResult | ScheduleResult | NoServiceResult
+
+
+@dataclass(frozen=True, slots=True)
+class NoSavedCommute:
+    """Leave-now/lookup asked for a commute the rider hasn't saved."""
+
+    name: str | None = None  # the name they asked for, if any
+
+
+@dataclass(frozen=True, slots=True)
+class SaveNeedsTrip:
+    """A save request we couldn't pin to a concrete trip — ask for it first."""
+
+
+@dataclass(frozen=True, slots=True)
 class Fallback:
     """A non-transit request that isn't social chit-chat — nudge back to Dexter's job."""
 
@@ -67,6 +104,10 @@ Outcome = (
     | FacilitiesResult
     | StopNotOnRoute
     | Disambiguation
+    | SavedCommuteConfirmation
+    | LeaveNow
+    | NoSavedCommute
+    | SaveNeedsTrip
     | SkillUnavailable
     | SmallTalk
     | Fallback
@@ -78,6 +119,7 @@ class AgentState(TypedDict, total=False):
     # --- input ---
     message: str
     history: list[dict]  # optional prior turns passed to the router
+    user_id: str | None  # opaque per-rider token (saved commutes); None = anonymous
 
     # --- router-extracted slots (per turn) ---
     intent: str
@@ -86,6 +128,8 @@ class AgentState(TypedDict, total=False):
     direction_hint: str | None
     follow_up: bool
     offset: int  # how far a "later departures" follow-up advances ("the one after that")
+    commute_name: str | None  # name for save/leave-now ("morning", "work")
+    walk_minutes: int | None  # walk time to the stop, for save_commute
 
     # --- cross-turn memory ---
     last_target: ResolvedTarget | None

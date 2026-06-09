@@ -6,7 +6,16 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from dexter.agent.formatting import MAX_HISTORY_MESSAGES, format_node, format_outcome
-from dexter.agent.state import Fallback, ServiceError, SkillUnavailable, SmallTalk
+from dexter.agent.state import (
+    Fallback,
+    LeaveNow,
+    NoSavedCommute,
+    SavedCommuteConfirmation,
+    SaveNeedsTrip,
+    ServiceError,
+    SkillUnavailable,
+    SmallTalk,
+)
 from dexter.mbta.models import (
     Alert,
     AlertsResult,
@@ -350,6 +359,79 @@ def test_system_status_single_line():
 def test_system_status_all_normal():
     text = format_outcome(SystemStatusResult(affected=()))
     assert "whole system is running normally" in text
+
+
+# --- saved commutes ---------------------------------------------------------
+
+
+def test_saved_commute_confirmation():
+    text = format_outcome(
+        SavedCommuteConfirmation(
+            name="morning",
+            route_name="116",
+            stop_name="Bennington St @ Brooks St",
+            direction_destination="Maverick",
+            walk_minutes=5,
+        )
+    )
+    assert text == (
+        "Saved your morning commute: the 116 from Bennington St at Brooks St "
+        "toward Maverick, a 5-minute walk. Ask me when to leave anytime."
+    )
+
+
+def test_leave_now_subtracts_walk_time():
+    # Vehicles at 7, 15, 23 min; 5-min walk -> leave in 2, then 10.
+    result = PredictionResult(target=target(), minutes_away=(7, 15, 23))
+    text = format_outcome(LeaveNow(name="morning", walk_minutes=5, departures=result))
+    assert text == (
+        "Leave in 2 minutes to catch the 116 from Bennington St at Brooks St toward Maverick, "
+        "or in 10 minutes for the one after."
+    )
+
+
+def test_leave_now_says_leave_now_when_walk_zero_or_due():
+    result = PredictionResult(target=target(), minutes_away=(5, 12))
+    text = format_outcome(LeaveNow(name="work", walk_minutes=5, departures=result))
+    assert text.startswith("Leave now to catch the 116")
+
+
+def test_leave_now_warns_when_next_is_sooner_than_walk():
+    # Next vehicle in 3 min but a 5-min walk -> you'd miss it.
+    result = PredictionResult(target=target(), minutes_away=(3,))
+    text = format_outcome(LeaveNow(name="morning", walk_minutes=5, departures=result))
+    assert "sooner than your 5-minute walk" in text
+    assert "miss it" in text
+
+
+def test_leave_now_with_schedule_fallback():
+    when = datetime(2026, 6, 6, 8, 0, tzinfo=EASTERN)
+    result = ScheduleResult(target=target(), next_time=when)
+    text = format_outcome(LeaveNow(name="morning", walk_minutes=5, departures=result))
+    assert "scheduled for 8:00 AM" in text
+    assert "leave by about 7:55 AM" in text
+
+
+def test_leave_now_includes_alert_heads_up():
+    result = PredictionResult(
+        target=target(),
+        minutes_away=(7, 15),
+        alert=Alert(header="Delays.", effect="DELAY", severity=4),
+    )
+    text = format_outcome(LeaveNow(name="morning", walk_minutes=5, departures=result))
+    assert text.endswith("Heads up — there are delays.")
+
+
+def test_no_saved_commute_named_and_unnamed():
+    named = format_outcome(NoSavedCommute(name="evening"))
+    assert "saved as 'evening'" in named
+    unnamed = format_outcome(NoSavedCommute())
+    assert "haven't saved a commute yet" in unnamed
+
+
+def test_save_needs_trip_prompts_for_trip():
+    text = format_outcome(SaveNeedsTrip())
+    assert "Tell me the trip first" in text
 
 
 def test_no_ids_or_json_in_outputs():

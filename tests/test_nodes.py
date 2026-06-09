@@ -17,11 +17,21 @@ from dexter.agent.nodes import (
     clarify_node,
     facilities_node,
     fallback_node,
+    leave_now_node,
     predictions_node,
+    save_commute_node,
     service_status_node,
     smalltalk_node,
 )
-from dexter.agent.state import Fallback, ServiceError, SmallTalk
+from dexter.agent.state import (
+    Fallback,
+    LeaveNow,
+    NoSavedCommute,
+    SavedCommuteConfirmation,
+    SaveNeedsTrip,
+    ServiceError,
+    SmallTalk,
+)
 from dexter.mbta.alerts import AlertsService
 from dexter.mbta.client import MBTAClient
 from dexter.mbta.facilities import FacilitiesService
@@ -39,6 +49,7 @@ from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver
 from dexter.mbta.routes import RouteCache
 from dexter.mbta.stations import StationCache
+from dexter.profiles import CommuteStore, SavedCommute
 
 from .conftest import MBTA_BASE_URL, NOW, ROUTES_PAYLOAD, TARGET
 
@@ -525,4 +536,134 @@ async def test_no_service_outcome_propagates(deps):
         state, resolver=deps.resolver, departures=deps.departures, now=NOW
     )
     assert isinstance(update["result"], NoServiceResult)
+    await deps.client.aclose()
+
+
+# --- save_commute_node / leave_now_node -------------------------------------
+
+
+async def _store_at(tmp_path) -> CommuteStore:
+    store = CommuteStore(tmp_path / "dexter.db")
+    await store.init()
+    return store
+
+
+def _saved(user_id="u1", name="morning", walk=5) -> SavedCommute:
+    return SavedCommute(
+        user_id=user_id,
+        name=name,
+        route_id="116",
+        route_name="116",
+        stop_ids=("5740",),
+        stop_name="Bennington St @ Brooks St",
+        direction_id=1,
+        direction_destination="Maverick",
+        route_type=3,
+        walk_minutes=walk,
+    )
+
+
+async def test_save_commute_node_resolves_and_persists(deps, tmp_path):
+    deps.respx.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    store = await _store_at(tmp_path)
+    state = {
+        "route": "116",
+        "location": "Maverick",
+        "direction_hint": "Wonderland",
+        "commute_name": "Morning",  # mixed case -> normalized to "morning"
+        "walk_minutes": 5,
+        "user_id": "u1",
+    }
+    update = await save_commute_node(state, resolver=deps.resolver, store=store, now=NOW)
+
+    assert isinstance(update["result"], SavedCommuteConfirmation)
+    assert update["result"].name == "morning"
+    saved = await store.get("u1", "morning")
+    assert saved is not None
+    assert saved.route_id == "116"
+    assert saved.direction_destination == "Wonderland"
+    assert saved.walk_minutes == 5
+    await deps.client.aclose()
+
+
+async def test_save_commute_node_reuses_last_target(deps, tmp_path):
+    store = await _store_at(tmp_path)
+    state = {"last_target": TARGET, "commute_name": "work", "walk_minutes": 3, "user_id": "u1"}
+    update = await save_commute_node(state, resolver=deps.resolver, store=store, now=NOW)
+
+    assert isinstance(update["result"], SavedCommuteConfirmation)
+    saved = await store.get("u1", "work")
+    assert saved.route_name == "116"
+    assert saved.direction_destination == "Maverick"  # from TARGET, no re-resolution
+    assert saved.walk_minutes == 3
+    await deps.client.aclose()
+
+
+async def test_save_commute_node_needs_trip_when_nothing_to_save(deps, tmp_path):
+    store = await _store_at(tmp_path)
+    update = await save_commute_node(
+        {"commute_name": "morning", "user_id": "u1"}, resolver=deps.resolver, store=store
+    )
+    assert isinstance(update["result"], SaveNeedsTrip)
+    await deps.client.aclose()
+
+
+async def test_save_commute_node_defaults_anonymous_user_to_local(deps, tmp_path):
+    deps.respx.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    store = await _store_at(tmp_path)
+    state = {"route": "116", "location": "Maverick", "direction_hint": "Wonderland"}
+    await save_commute_node(state, resolver=deps.resolver, store=store, now=NOW)
+    # No user_id -> stored under the single-user "local" key (commute name defaults too).
+    assert await store.get("local", "default") is not None
+    await deps.client.aclose()
+
+
+async def test_leave_now_node_uses_saved_commute(deps, tmp_path):
+    store = await _store_at(tmp_path)
+    await store.save(_saved(user_id="u1", name="morning", walk=5))
+    deps.respx.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=predictions_payload(10, 20))
+    )
+    update = await leave_now_node(
+        {"user_id": "u1", "commute_name": "morning"},
+        store=store,
+        departures=deps.departures,
+        now=NOW,
+    )
+    assert isinstance(update["result"], LeaveNow)
+    assert update["result"].name == "morning"
+    assert update["result"].walk_minutes == 5
+    assert isinstance(update["result"].departures, PredictionResult)
+    assert update["result"].departures.minutes_away == (10, 20)
+    await deps.client.aclose()
+
+
+async def test_leave_now_node_without_name_finds_sole_commute(deps, tmp_path):
+    store = await _store_at(tmp_path)
+    await store.save(_saved(user_id="u1", name="whatever", walk=4))
+    deps.respx.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=predictions_payload(8))
+    )
+    update = await leave_now_node(
+        {"user_id": "u1"}, store=store, departures=deps.departures, now=NOW
+    )
+    assert isinstance(update["result"], LeaveNow)
+    assert update["result"].name == "whatever"  # the only saved one, picked unambiguously
+    await deps.client.aclose()
+
+
+async def test_leave_now_node_no_saved_commute(deps, tmp_path):
+    store = await _store_at(tmp_path)
+    update = await leave_now_node(
+        {"user_id": "u1", "commute_name": "morning"},
+        store=store,
+        departures=deps.departures,
+        now=NOW,
+    )
+    assert isinstance(update["result"], NoSavedCommute)
+    assert update["result"].name == "morning"
     await deps.client.aclose()

@@ -17,6 +17,7 @@ from dexter.mbta.models import Disambiguation, PredictionResult
 from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver
 from dexter.mbta.routes import RouteCache
+from dexter.profiles import CommuteStore
 
 from .conftest import MBTA_BASE_URL, ROUTES_PAYLOAD
 
@@ -54,7 +55,7 @@ def future_predictions(*offsets_min: float) -> dict:
     }
 
 
-def build(respx_mock, router: FakeRouter):
+def build(respx_mock, router: FakeRouter, store=None):
     respx_mock.get(f"{MBTA_BASE_URL}/routes").mock(
         return_value=httpx.Response(200, json=ROUTES_PAYLOAD)
     )
@@ -67,7 +68,7 @@ def build(respx_mock, router: FakeRouter):
     client = MBTAClient(base_url=MBTA_BASE_URL)
     resolver = Resolver(client, RouteCache(client))
     departures = DeparturesService(client)
-    graph = build_graph(router=router, resolver=resolver, departures=departures)
+    graph = build_graph(router=router, resolver=resolver, departures=departures, store=store)
     return graph, client
 
 
@@ -415,4 +416,67 @@ async def test_replies_have_no_ids_or_json(respx_mock):
     assert "{" not in reply and "}" not in reply
     assert "70" not in reply  # no stop_id
     assert "_id" not in reply
+    await client.aclose()
+
+
+async def test_save_commute_then_leave_now_end_to_end(respx_mock, tmp_path):
+    respx_mock.get(f"{MBTA_BASE_URL}/stops").mock(
+        return_value=httpx.Response(200, json=stops_payload(("70", "Maverick Station")))
+    )
+    # Next vehicles in 10 and 20 min; a 5-min walk -> leave in 5, then 15.
+    respx_mock.get(f"{MBTA_BASE_URL}/predictions").mock(
+        return_value=httpx.Response(200, json=future_predictions(10, 20))
+    )
+    save_msg = "save the 116 from Maverick toward Wonderland as morning, 5 min walk"
+    router = FakeRouter(
+        {
+            save_msg: RouterSlots(
+                intent="save_commute",
+                route="116",
+                location="Maverick",
+                direction_hint="Wonderland",
+                commute_name="morning",
+                walk_minutes=5,
+            ),
+            "should I leave now for my morning commute?": RouterSlots(
+                intent="leave_now", commute_name="morning"
+            ),
+        }
+    )
+    store = CommuteStore(tmp_path / "dexter.db")
+    await store.init()
+    graph, client = build(respx_mock, router, store=store)
+
+    # Turn 1: save (carries the rider's opaque user_id), turn 2: ask when to leave.
+    turn1 = await graph.ainvoke(
+        {"message": save_msg, "user_id": "rider-1"},
+        config("commute"),
+    )
+    assert "Saved your morning commute" in turn1["reply"]
+    assert await store.get("rider-1", "morning") is not None  # actually persisted
+
+    turn2 = await graph.ainvoke(
+        {"message": "should I leave now for my morning commute?", "user_id": "rider-1"},
+        config("commute"),
+    )
+    # Exact leave-in math is unit-tested in test_formatting; here just confirm the
+    # leave-now wiring resolved the saved commute and produced a leave-in reply.
+    reply2 = turn2["reply"]
+    assert reply2.startswith("Leave in ")
+    assert "to catch the 116 from Maverick Station toward Wonderland" in reply2
+    assert "for the one after" in reply2
+    await client.aclose()
+
+
+async def test_leave_now_without_saved_commute_guides_user(respx_mock, tmp_path):
+    router = FakeRouter(
+        {"should I leave now?": RouterSlots(intent="leave_now")},
+    )
+    store = CommuteStore(tmp_path / "dexter.db")
+    await store.init()
+    graph, client = build(respx_mock, router, store=store)
+    turn = await graph.ainvoke(
+        {"message": "should I leave now?", "user_id": "new-rider"}, config("nocommute")
+    )
+    assert "haven't saved a commute yet" in turn["reply"]
     await client.aclose()

@@ -146,12 +146,24 @@ const gate = document.getElementById("gate");
 const gateInput = document.getElementById("gate-input");
 const gateError = document.getElementById("gate-error");
 
+function newId() {
+  return (crypto.randomUUID && crypto.randomUUID()) ||
+         String(Date.now()) + Math.random().toString(16).slice(2);
+}
+
 // Anonymous, per-tab session id so multi-turn follow-ups group correctly.
 let sessionId = sessionStorage.getItem("dexter_sid");
 if (!sessionId) {
-  sessionId = (crypto.randomUUID && crypto.randomUUID()) ||
-              String(Date.now()) + Math.random().toString(16).slice(2);
+  sessionId = newId();
   sessionStorage.setItem("dexter_sid", sessionId);
+}
+
+// Durable, per-browser user id (localStorage) so saved commutes persist across
+// tabs and visits. Opaque token, no PII; clearing storage = a new identity.
+let userId = localStorage.getItem("dexter_uid");
+if (!userId) {
+  userId = newId();
+  localStorage.setItem("dexter_uid", userId);
 }
 
 let passcode = sessionStorage.getItem("dexter_pass") || null;
@@ -201,6 +213,7 @@ async function typeReply(text) {
 async function sendChat(message) {
   const headers = { "Content-Type": "application/json" };
   if (passcode) headers["X-Dexter-Passcode"] = passcode;
+  headers["X-Dexter-User"] = userId;
   const res = await fetch("/chat", {
     method: "POST",
     headers,

@@ -79,6 +79,39 @@ async def test_classifies_service_status():
     assert slots.route is None
 
 
+async def test_classifies_save_commute_with_name_and_walk():
+    client, _ = make_client(
+        {
+            "intent": "save_commute",
+            "route": "116",
+            "location": "Bennington Street",
+            "direction_hint": "Maverick",
+            "commute_name": "morning",
+            "walk_minutes": 5,
+        }
+    )
+    slots = await Router(client, "gpt-4.1-mini").route(
+        "save the 116 from Bennington toward Maverick as my morning commute, 5 minute walk"
+    )
+    assert slots.intent == "save_commute"
+    assert slots.commute_name == "morning"
+    assert slots.walk_minutes == 5
+
+
+async def test_classifies_leave_now():
+    client, _ = make_client({"intent": "leave_now", "commute_name": "work"})
+    slots = await Router(client, "gpt-4.1-mini").route("should I leave now for work?")
+    assert slots.intent == "leave_now"
+    assert slots.commute_name == "work"
+    assert slots.walk_minutes is None  # absent -> None
+
+
+async def test_walk_minutes_degrades_on_bad_value():
+    client, _ = make_client({"intent": "save_commute", "walk_minutes": "soon"})
+    slots = await Router(client, "gpt-4.1-mini").route("save this")
+    assert slots.walk_minutes is None
+
+
 async def test_classifies_facilities():
     client, _ = make_client({"intent": "facilities", "location": "Park Street"})
     slots = await Router(client, "gpt-5-mini").route("is the elevator at Park Street working?")

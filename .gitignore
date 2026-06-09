@@ -9,6 +9,10 @@ __pycache__/
 build/
 dist/
 
+# Saved-commute SQLite store (runtime data)
+*.db
+*.db-journal
+
 # Virtual envs
 .venv/
 venv/

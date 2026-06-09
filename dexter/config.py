@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     dexter_port: int = 8000
     log_level: str = "INFO"
 
+    # --- Profiles / saved commutes (defaulted) ---
+    # SQLite file for saved commutes. Defaults to a local file; in the deployed
+    # container point this at a mounted volume so commutes survive restarts.
+    dexter_db_path: str = "dexter.db"
+
     # --- Beta web client (optional, off by default) ---
     # When ``dexter_serve_web`` is on, the brain serves the static terminal UI
     # (``web/index.html``) at ``GET /``. ``dexter_passcode`` gates ``/chat``: when

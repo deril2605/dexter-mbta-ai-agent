@@ -16,7 +16,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-INTENTS = ("predictions", "alerts", "service_status", "facilities", "smalltalk", "unknown")
+INTENTS = (
+    "predictions",
+    "leave_now",
+    "save_commute",
+    "alerts",
+    "service_status",
+    "facilities",
+    "smalltalk",
+    "unknown",
+)
 TOOL_NAME = "extract_transit_query"
 
 SYSTEM_PROMPT = """You are the intent router for Dexter, an MBTA (Boston) transit assistant.
@@ -34,6 +43,12 @@ Maverick" means route "116", direction_hint "Maverick", and no location.
 intent:
 - "predictions": when the next bus/train arrives or departs \
 (e.g. "when's the next 116 from Bennington Street toward Maverick").
+- "leave_now": the rider asks when to LEAVE for a saved commute, or whether to go now \
+("should I leave now?", "when should I leave for work?", "do I have time?"). Often names a \
+saved commute ("leave now for my morning commute") — put that in commute_name.
+- "save_commute": the rider asks to SAVE or remember a trip as a named commute \
+("save this as my morning commute", "remember the 116 from Bennington to Maverick as work, \
+5 minute walk"). Put the label in commute_name and any stated walk time in walk_minutes.
 - "alerts": service alerts, delays, or disruptions for ONE named route or line \
 ("is the Blue Line down?", "any delays on the 66?").
 - "service_status": the health of the whole system, when NO specific route is named \
@@ -58,7 +73,11 @@ carried from an earlier turn when they're clearly still talking about it.
 ("and the one after?", "what about inbound?") or a short answer to a clarifying question \
 ("the 116", "toward Maverick", "Maverick Station").
 - offset: for a follow-up asking for LATER departures, how many to advance past the next one — \
-1 for "and the one after that?", 2 for "two after that"; 0 (or omit) otherwise."""
+1 for "and the one after that?", 2 for "two after that"; 0 (or omit) otherwise.
+- commute_name: the rider's label for a saved commute ("morning", "work", "home"), for \
+save_commute and leave_now. Omit if they didn't name one.
+- walk_minutes: how many minutes the rider says it takes to walk to the stop, for save_commute \
+("5 minute walk" -> 5). Omit if not stated."""
 
 _TOOL = {
     "type": "function",
@@ -77,6 +96,14 @@ _TOOL = {
                     "type": "integer",
                     "description": "Advance for a 'later departures' follow-up: "
                     "1 for 'the one after that', else 0.",
+                },
+                "commute_name": {
+                    "type": "string",
+                    "description": "Saved-commute label, e.g. morning or work.",
+                },
+                "walk_minutes": {
+                    "type": "integer",
+                    "description": "Stated walk time to the stop, in minutes.",
                 },
             },
             "required": ["intent"],
@@ -104,6 +131,8 @@ class RouterSlots:
     direction_hint: str | None = None
     follow_up: bool = False
     offset: int = 0
+    commute_name: str | None = None
+    walk_minutes: int | None = None
 
 
 class Router:
@@ -186,7 +215,19 @@ def _parse_response(response) -> RouterSlots:
         direction_hint=_clean(args.get("direction_hint")),
         follow_up=bool(args.get("follow_up", False)),
         offset=_parse_offset(args.get("offset")),
+        commute_name=_clean(args.get("commute_name")),
+        walk_minutes=_parse_walk_minutes(args.get("walk_minutes")),
     )
+
+
+def _parse_walk_minutes(value) -> int | None:
+    """A non-negative walk time in minutes; None when absent or unparseable."""
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _clean(value) -> str | None:

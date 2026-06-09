@@ -22,6 +22,7 @@ from dexter.mbta.facilities import FacilitiesService
 from dexter.mbta.predictions import DeparturesService
 from dexter.mbta.resolution import Resolver
 from dexter.mbta.stations import StationCache
+from dexter.profiles import CommuteStore
 
 from .formatting import format_node
 from .nodes import (
@@ -29,8 +30,10 @@ from .nodes import (
     clarify_node,
     facilities_node,
     fallback_node,
+    leave_now_node,
     predictions_node,
     router_node,
+    save_commute_node,
     service_status_node,
     smalltalk_node,
 )
@@ -39,6 +42,8 @@ from .state import AgentState
 
 _INTENT_TO_NODE = {
     "predictions": "predictions",
+    "leave_now": "leave_now",
+    "save_commute": "save_commute",
     "alerts": "alerts",
     "service_status": "service_status",
     "facilities": "facilities",
@@ -85,16 +90,21 @@ def build_graph(
     alerts: AlertsService | None = None,
     facilities: FacilitiesService | None = None,
     stations: StationCache | None = None,
+    store: CommuteStore | None = None,
     checkpointer=None,
 ):
     """Compile the Dexter agent graph. Pass ``checkpointer=False`` to disable it.
 
     The alerts/facilities skills default to services built on the resolver's shared
     MBTA client + route cache, so existing callers need only pass the core three.
+    ``store`` backs saved commutes; real callers inject a persistent one (the service
+    builds it from config). The default is an ephemeral placeholder so the save/
+    leave-now nodes are always wired even when persistence isn't configured.
     """
     alerts = alerts or AlertsService(resolver.client)
     facilities = facilities or FacilitiesService(resolver.client)
     stations = stations or StationCache(resolver.client)
+    store = store or CommuteStore(":memory:")
 
     builder = StateGraph(AgentState)
 
@@ -127,6 +137,14 @@ def build_graph(
         ),
     )
     builder.add_node("service_status", functools.partial(service_status_node, alerts=alerts))
+    builder.add_node(
+        "save_commute",
+        functools.partial(save_commute_node, resolver=resolver, store=store),
+    )
+    builder.add_node(
+        "leave_now",
+        functools.partial(leave_now_node, store=store, departures=departures, alerts=alerts),
+    )
     builder.add_node("smalltalk", functools.partial(smalltalk_node, router=router))
     builder.add_node("fallback", fallback_node)
     builder.add_node("format", format_node)
@@ -138,6 +156,8 @@ def build_graph(
         {
             "clarify": "clarify",
             "predictions": "predictions",
+            "leave_now": "leave_now",
+            "save_commute": "save_commute",
             "alerts": "alerts",
             "service_status": "service_status",
             "facilities": "facilities",
@@ -148,6 +168,8 @@ def build_graph(
     for node in (
         "predictions",
         "clarify",
+        "leave_now",
+        "save_commute",
         "alerts",
         "service_status",
         "facilities",
