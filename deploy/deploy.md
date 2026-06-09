@@ -10,9 +10,27 @@ serves it from the same origin, so there is no CORS setup to manage.
 - One container built from `deploy/Dockerfile` and run by Azure Container Apps.
 - Serves the terminal UI at `/`, the API at `/chat`, and health at `/health`.
 - Public HTTPS ingress on port `8000`.
-- `minReplicas: 1` so the beta stays warm.
+- `minReplicas: 0` by default (scale to zero — pay nothing while idle).
+- An **Azure Files share** (a Standard storage account) mounted at `/data`, holding the
+  SQLite file for **saved commutes** so they survive restarts and scale-to-zero.
 - Shared passcode gate via `DEXTER_PASSCODE`.
 - Phoenix tracing only when tracing credentials are present.
+
+### Saved-commute persistence (why the share?)
+Saved commutes live in a SQLite file. SQLite is *embedded* — it runs inside the container
+with no separate database server, so there's nothing billed 24/7 and it scales to zero with
+the app. But the container's own filesystem is **ephemeral**: scale-to-zero or any restart
+wipes it. So the deploy provisions an Azure Files share and mounts it at `/data`, and sets
+`DEXTER_DB_PATH=/data/dexter.db`. The data lives on the durable share; the container is free
+to come and go.
+
+> **Single writer:** SQLite over a network share is safe with exactly one writer, so keep
+> `AZURE_CONTAINER_MAX_REPLICAS=1`. If you later need to scale out horizontally, switch the
+> `CommuteStore` backend to a multi-writer store (e.g. Azure Table Storage or Postgres) —
+> the agent code doesn't change, only the store implementation.
+
+The storage account/share are created idempotently and are **not** deleted by `--teardown`
+(only by `--teardown --delete-resource-group`), so rider data isn't lost on a redeploy.
 
 ## Deployment model
 
@@ -83,7 +101,10 @@ Important deploy settings:
 - `AZURE_CONTAINER_REGISTRY_RESOURCE_GROUP` optional when ACR lives outside the app RG
 - `AZURE_CONTAINER_REPOSITORY`
 - `AZURE_CONTAINER_IMAGE_TAG` optional
-- `AZURE_CONTAINER_MAX_REPLICAS`
+- `AZURE_CONTAINER_MIN_REPLICAS` optional (default `0`; also `--min-replicas`)
+- `AZURE_CONTAINER_MAX_REPLICAS` (keep at `1` for the SQLite single-writer constraint)
+- `AZURE_STORAGE_ACCOUNT_NAME` optional (derived from the subscription if blank)
+- `AZURE_FILE_SHARE_NAME` optional (default `dexter-data`)
 
 For your current shared-infra setup, the local `.env` is already seeded with:
 - `AZURE_RESOURCE_GROUP=rg-dealsignal-prod`

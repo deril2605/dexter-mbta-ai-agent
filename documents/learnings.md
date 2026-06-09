@@ -426,6 +426,16 @@ Lessons:
   unregistered result dataclasses). Pre-existing for all outcome types; the new ones join the
   list. Still a warning, tracked in the hardening backlog — register types (or drop `result`
   from the checkpoint) before LangGraph enforces it.
+- **Cloud persistence on ACA: keep SQLite, move the *file* — don't add a DB server.** The first
+  ACA deploy lost commutes because the container filesystem is ephemeral and the app runs
+  `minReplicas=0` (scale to zero → container destroyed when idle → `dexter.db` wiped). The fix
+  isn't Postgres (an always-on server billed 24/7, the opposite of scale-to-zero); it's mounting
+  an **Azure Files share** at `/data` and pointing `DEXTER_DB_PATH` there. SQLite stays embedded
+  (no server, scales to zero with the app) while the data lives on the durable share. Wired into
+  `deploy/deploy.py` (storage account + share + managed-environment storage + volume mount), with
+  `minReplicas` now configurable (default 0). **Constraint:** SQLite-over-a-share is single-writer,
+  so `maxReplicas` stays 1; horizontal scale would mean swapping the `CommuteStore` backend (Table
+  Storage / Postgres) — agent code unchanged, which is exactly why the store is an interface.
 
 ---
 

@@ -25,6 +25,7 @@ try:
         RegistryUpdateParameters,
     )
     from azure.mgmt.resource import ResourceManagementClient
+    from azure.mgmt.storage import StorageManagementClient
 except ImportError as exc:  # pragma: no cover - import path depends on local install
     print(
         "Missing Azure SDK dependency. Install them with:\n"
@@ -36,6 +37,14 @@ except ImportError as exc:  # pragma: no cover - import path depends on local in
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BOOTSTRAP_IMAGE = "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+
+# Saved commutes live in a SQLite file on a durable Azure Files share mounted into
+# the container at this path. SQLite is embedded (no DB server, scales to zero with
+# the app), while the data persists on the share across restarts/scale-to-zero. Safe
+# with a single writer — keep maxReplicas=1 while using this.
+DATA_VOLUME_NAME = "dexter-data"
+DATA_MOUNT_PATH = "/data"
+DB_FILE_PATH = f"{DATA_MOUNT_PATH}/dexter.db"
 
 
 def info(message: str) -> None:
@@ -118,6 +127,13 @@ def deterministic_registry_name(subscription_id: str, app_name: str) -> str:
     return f"{base}{suffix}"[:50]
 
 
+def deterministic_storage_account_name(subscription_id: str, app_name: str) -> str:
+    """A globally-unique-ish storage account name (3-24 lowercase alphanumerics)."""
+    base = "".join(ch for ch in app_name.lower() if ch.isalnum()) or "dexter"
+    suffix = subscription_id.replace("-", "").lower()
+    return f"{base}{suffix}"[:24]
+
+
 def build_revision_suffix(image_tag: str) -> str:
     seed = f"deploy-{image_tag}-{datetime.now(UTC).strftime('%H%M%S')}".lower()
     cleaned = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in seed).strip("-")
@@ -161,7 +177,11 @@ class DeployConfig:
     registry_name: str
     image_repository: str
     image_tag: str
+    min_replicas: int
     max_replicas: int
+    storage_account_name: str
+    file_share_name: str
+    env_storage_name: str
     docker_exe: str
     azure_openai_endpoint: str
     azure_openai_api_key: str
@@ -249,6 +269,29 @@ def collect_config(args: argparse.Namespace, merged_env: dict[str, str]) -> Depl
         fail("AZURE_CONTAINER_MAX_REPLICAS must be an integer.")
     if max_replicas < 1:
         fail("AZURE_CONTAINER_MAX_REPLICAS must be at least 1.")
+    # Default minReplicas=0 (scale to zero — pay nothing while idle). Saved commutes
+    # survive because the SQLite file lives on the mounted Azure Files share, not the
+    # ephemeral container. Keep max_replicas=1 so there's a single SQLite writer.
+    min_replicas_raw = (
+        str(args.min_replicas)
+        if args.min_replicas is not None
+        else merged_env.get("AZURE_CONTAINER_MIN_REPLICAS", "").strip() or "0"
+    )
+    try:
+        min_replicas = int(min_replicas_raw)
+    except ValueError:
+        fail("AZURE_CONTAINER_MIN_REPLICAS must be an integer.")
+    if min_replicas < 0:
+        fail("AZURE_CONTAINER_MIN_REPLICAS must be 0 or greater.")
+    if min_replicas > max_replicas:
+        fail("AZURE_CONTAINER_MIN_REPLICAS cannot exceed AZURE_CONTAINER_MAX_REPLICAS.")
+
+    storage_account_name = (
+        merged_env.get("AZURE_STORAGE_ACCOUNT_NAME", "").strip()
+        or deterministic_storage_account_name(subscription_id, app_name)
+    )
+    file_share_name = merged_env.get("AZURE_FILE_SHARE_NAME", "").strip() or "dexter-data"
+    env_storage_name = DATA_VOLUME_NAME
 
     azure_openai_endpoint = resolve_config_value(
         merged_env, "AZURE_OPENAI_ENDPOINT", "Azure OpenAI endpoint"
@@ -305,7 +348,11 @@ def collect_config(args: argparse.Namespace, merged_env: dict[str, str]) -> Depl
         registry_name=registry_name,
         image_repository=image_repository,
         image_tag=image_tag,
+        min_replicas=min_replicas,
         max_replicas=max_replicas,
+        storage_account_name=storage_account_name,
+        file_share_name=file_share_name,
+        env_storage_name=env_storage_name,
         docker_exe=docker_exe,
         azure_openai_endpoint=azure_openai_endpoint,
         azure_openai_api_key=azure_openai_api_key,
@@ -466,6 +513,65 @@ def ensure_environment(app_client: ContainerAppsAPIClient, config: DeployConfig)
         return poller.result()
 
 
+def ensure_storage(storage_client: StorageManagementClient, config: DeployConfig) -> str:
+    """Ensure the storage account + Azure Files share exist; return an account key.
+
+    The share holds the SQLite file (saved commutes). Idempotent: reuses an existing
+    account/share on redeploys, so rider data is never wiped by a deploy.
+    """
+    rg = config.resource_group
+    name = config.storage_account_name
+    try:
+        storage_client.storage_accounts.get_properties(rg, name)
+        info(f"Storage account {name} exists; reusing it")
+    except ResourceNotFoundError:
+        info(f"Creating storage account {name}")
+        storage_client.storage_accounts.begin_create(
+            rg,
+            name,
+            {
+                "sku": {"name": "Standard_LRS"},
+                "kind": "StorageV2",
+                "location": config.location,
+            },
+        ).result()
+
+    info(f"Ensuring Azure Files share {config.file_share_name}")
+    try:
+        storage_client.file_shares.create(rg, name, config.file_share_name, {})
+    except HttpResponseError as exc:
+        if exc.status_code != 409:  # 409 = share already exists, which is fine
+            raise
+
+    keys = storage_client.storage_accounts.list_keys(rg, name)
+    for entry in get_attr(keys, "keys") or []:
+        if value := get_attr(entry, "value"):
+            return value
+    fail("Could not retrieve a storage account key for the Azure Files mount.")
+
+
+def ensure_env_storage(
+    app_client: ContainerAppsAPIClient, config: DeployConfig, account_key: str
+) -> None:
+    """Register the Azure Files share as managed-environment storage (so it's mountable)."""
+    info(f"Registering Azure Files storage '{config.env_storage_name}' on the environment")
+    app_client.managed_environments_storages.create_or_update(
+        resource_group_name=config.environment_resource_group,
+        environment_name=config.environment_name,
+        storage_name=config.env_storage_name,
+        storage_envelope={
+            "properties": {
+                "azureFile": {
+                    "accountName": config.storage_account_name,
+                    "accountKey": account_key,
+                    "shareName": config.file_share_name,
+                    "accessMode": "ReadWrite",
+                }
+            }
+        },
+    )
+
+
 def get_container_app(app_client: ContainerAppsAPIClient, config: DeployConfig) -> Any | None:
     try:
         return app_client.container_apps.get(config.resource_group, config.app_name)
@@ -509,7 +615,10 @@ def ensure_bootstrap_app(
                             "image": DEFAULT_BOOTSTRAP_IMAGE,
                         }
                     ],
-                    "scale": {"minReplicas": 1, "maxReplicas": config.max_replicas},
+                    "scale": {
+                        "minReplicas": config.min_replicas,
+                        "maxReplicas": config.max_replicas,
+                    },
                 },
             },
         },
@@ -594,6 +703,8 @@ def desired_env(config: DeployConfig) -> list[dict[str, str]]:
         {"name": "DEXTER_TRACING", "value": "true" if config.tracing_enabled else "false"},
         {"name": "MBTA_BASE_URL", "value": config.mbta_base_url},
         {"name": "LOG_LEVEL", "value": config.log_level},
+        # Saved commutes persist to the mounted Azure Files share (survives scale-to-zero).
+        {"name": "DEXTER_DB_PATH", "value": DB_FILE_PATH},
     ]
     if config.mbta_api_key:
         env.append({"name": "MBTA_API_KEY", "secretRef": "mbta-api-key"})
@@ -637,9 +748,25 @@ def deploy_container_app(
                             "name": config.app_name,
                             "image": config.image_reference,
                             "env": desired_env(config),
+                            "volumeMounts": [
+                                {
+                                    "volumeName": DATA_VOLUME_NAME,
+                                    "mountPath": DATA_MOUNT_PATH,
+                                }
+                            ],
                         }
                     ],
-                    "scale": {"minReplicas": 1, "maxReplicas": config.max_replicas},
+                    "volumes": [
+                        {
+                            "name": DATA_VOLUME_NAME,
+                            "storageType": "AzureFile",
+                            "storageName": config.env_storage_name,
+                        }
+                    ],
+                    "scale": {
+                        "minReplicas": config.min_replicas,
+                        "maxReplicas": config.max_replicas,
+                    },
                 },
             },
         },
@@ -725,6 +852,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-repository")
     parser.add_argument("--image-tag")
     parser.add_argument("--env-file")
+    parser.add_argument("--min-replicas", type=int)
     parser.add_argument("--max-replicas", type=int)
     parser.add_argument("--docker-exe")
     parser.add_argument("--teardown", action="store_true")
@@ -753,6 +881,7 @@ def main() -> None:
     acr_client = ContainerRegistryManagementClient(credential, config.subscription_id)
     app_client = ContainerAppsAPIClient(credential, config.subscription_id)
     auth_client = AuthorizationManagementClient(credential, config.subscription_id)
+    storage_client = StorageManagementClient(credential, config.subscription_id)
 
     if args.delete_resource_group and not args.teardown:
         fail("--delete-resource-group only makes sense together with --teardown.")
@@ -763,6 +892,7 @@ def main() -> None:
 
     ensure_provider(resource_client, "Microsoft.App")
     ensure_provider(resource_client, "Microsoft.ContainerRegistry")
+    ensure_provider(resource_client, "Microsoft.Storage")
     ensure_resource_groups(resource_client, config)
     registry = ensure_registry(acr_client, config)
     username, password = get_registry_credentials(acr_client, config)
@@ -791,6 +921,11 @@ def main() -> None:
     ensure_acrpull_role(auth_client, principal_id, registry_id)
     time.sleep(5)
 
+    # Durable storage for saved commutes: an Azure Files share mounted into the
+    # container, so the SQLite file survives restarts and scale-to-zero.
+    account_key = ensure_storage(storage_client, config)
+    ensure_env_storage(app_client, config, account_key)
+
     app = deploy_container_app(app_client, config, environment_id)
     fqdn = get_fqdn(app)
 
@@ -803,6 +938,11 @@ def main() -> None:
     )
     print(f"Registry: {config.registry_name}")
     print(f"Image: {config.image_reference}")
+    print(
+        f"Saved commutes: {config.storage_account_name}/{config.file_share_name} "
+        f"mounted at {DB_FILE_PATH}"
+    )
+    print(f"Scale: minReplicas={config.min_replicas}, maxReplicas={config.max_replicas}")
 
 
 if __name__ == "__main__":

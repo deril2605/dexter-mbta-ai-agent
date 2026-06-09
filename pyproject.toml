@@ -47,6 +47,7 @@ deploy = [
     "azure-mgmt-authorization>=4.0",
     "azure-mgmt-containerregistry>=13.0",
     "azure-mgmt-resource>=23.1",
+    "azure-mgmt-storage>=21.1",
 ]
 
 [build-system]
